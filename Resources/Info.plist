@@ -2,37 +2,35 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>HDRSwitch</string>
-    <key>CFBundleDisplayName</key>
-    <string>HDRSwitch</string>
-    <key>CFBundleExecutable</key>
-    <string>HDRSwitch</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.wangjin.hdrswitch</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSupportsAutomaticTermination</key>
-    <false/>
-    <key>NSSupportsSuddenTermination</key>
-    <false/>
-    <key>NSHumanReadableCopyright</key>
-    <string>HDRSwitch — 一键开关 HDR</string>
-    <!-- 网页视频本身不对外暴露画质，只能回页面里问一句；
-         缺这一条 macOS 会静默拒绝所有 Apple 事件，且不弹授权框 -->
-    <key>NSAppleEventsUsageDescription</key>
-    <string>读取浏览器当前播放的网页视频画质（是否 HDR），用于自动开关 HDR。</string>
+	<key>CFBundleDisplayName</key>
+	<string>HDRSwitch</string>
+	<key>CFBundleExecutable</key>
+	<string>HDRSwitch</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.wangjin.hdrswitch</string>
+	<key>CFBundleName</key>
+	<string>HDRSwitch</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.1</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>读取浏览器当前播放的网页视频画质（是否 HDR），用于自动开关 HDR。</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>HDRSwitch — 一键开关 HDR</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
 </dict>
 </plist>

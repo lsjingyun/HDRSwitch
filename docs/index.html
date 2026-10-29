@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.0.0 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.0.1 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -142,6 +142,7 @@
     <li><span class="n">08</span><a href="#debug">出问题了怎么查</a></li>
     <li><span class="n">09</span><a href="#faq">常见问题</a></li>
     <li><span class="n">10</span><a href="#bye">卸载 · 已知限制</a></li>
+    <li><span class="n">11</span><a href="#log">版本记录</a></li>
   </ol>
 </nav>
 
@@ -558,8 +559,22 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
   <li>切换必然黑一下（约 0.7 秒）并伴随一次显示模式变更，这是 macOS 的行为。</li>
 </ul>
 
+<!-- ══════════════════ 11 ══════════════════ -->
+<h2 id="log"><span class="n">11</span>版本记录</h2>
+
+<h3>1.0.1 · 2026-10-30</h3>
+<ul>
+  <li><b>修掉「下载器被当成播放器」</b>：qBittorrent 下 HDR 片源时，屏幕会被误切到 HDR。下载器会长时间持有 <code>.mkv</code> 句柄（下载中、做种中）却从不播放，现在它们整个不参与判定（含 Transmission、迅雷、Motrix、Folx、Downie、FDM、网盘客户端等），另加「文件正在变大、或刚写完 4 秒以内不算播放」的兜底。<code>$B why</code> 会多打一行「已忽略下载器」。</li>
+  <li>本机 SMB 那条线同样过滤正在写入的文件——往共享目录里拷片源不会再触发切换。</li>
+</ul>
+
+<h3>1.0.0 · 2026-10-30</h3>
+<ul>
+  <li>首个版本：菜单栏开关、按片源自动切换、网页视频实测画质、YouTube 解锁 HDR 并直接拉到 4K HDR、共享片源识别。</li>
+</ul>
+
 <p class="foot">
-  HDRSwitch 1.0.0 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。
+  HDRSwitch 1.0.1 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。
 </p>
 
 </div>

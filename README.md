@@ -17,7 +17,7 @@ macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片�
 
 ## 下载
 
-**[HDRSwitch-1.0.0.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.0.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel）
+**[HDRSwitch-1.0.1.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.1.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
 
 打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地 ad-hoc 签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
 
