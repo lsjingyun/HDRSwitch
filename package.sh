@@ -151,6 +151,9 @@ if [ -f docs/index.html ]; then
     cp docs/index.html "$STAGE/使用说明.html"
 fi
 
+# 许可证（MIT，分发时随包带上）
+[ -f LICENSE ] && cp LICENSE "$STAGE/LICENSE.txt"
+
 echo "==> 4/5 生成磁盘映像"
 rm -f "$DMG"
 hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" -ov -format UDZO \

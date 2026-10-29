@@ -322,3 +322,14 @@ defaults delete com.wangjin.hdrswitch
 - Infuse 走网络串流（拿不到文件句柄）时判断不了画质，默认不切 HDR；要切可在菜单打开「播放器识别不到片源时也开 HDR」
 - 排查问题：先跑 `HDRSwitch why`，一次列出显示器状态、现场识别结果、自动模式是否被手动接管、失败计数和最近日志
 - 需要更细的每轮判定日志时：`defaults write com.wangjin.hdrswitch debugLog -bool true` 后重启 App（动作级事件本来就会写进 `~/Library/Logs/HDRSwitch.log`，文件超过 512KB 自动清空）
+
+## 许可证
+
+[MIT](LICENSE) © 2026 lsjingyun
+
+随便用、随便改、商用也行，只要在副本里保留版权声明和许可证原文；软件按「现状」提供，出问题不承担任何责任。
+
+两点顺带说清：
+
+- 工具调用的那些接口（SkyLight 的 `CoreDisplay_*` / `SLSDisplaySetHDRModeEnabled`）是 Apple 的私有 API，**不属于本项目授权范围**。要不要在上架软件里用它们，得你自己判断。
+- 想让 App Store 上架、或改成别的协议（GPL / Apache-2.0），随时可以改；目前没有外部贡献者，不存在需要征得同意的人。

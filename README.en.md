@@ -322,3 +322,14 @@ defaults delete com.wangjin.hdrswitch
 - Infuse over network streaming (no file handle) can't be judged for quality and won't switch HDR by default; enable "Turn on HDR when the source can't be identified" in the menu if you want it to
 - Troubleshooting: run `HDRSwitch why` first — it lists display state, live detection results, whether automation was overridden manually, failure counts and the recent log in one go
 - For per-round decision logs: `defaults write com.wangjin.hdrswitch debugLog -bool true` and restart the app (action-level events are always written to `~/Library/Logs/HDRSwitch.log`, which is truncated past 512 KB)
+
+## License
+
+[MIT](LICENSE) © 2026 lsjingyun
+
+Use it, change it, sell it — just keep the copyright notice and the licence text in any copy. The software is provided "as is", with no warranty of any kind.
+
+Two things worth spelling out:
+
+- The interfaces this tool calls (SkyLight's `CoreDisplay_*` / `SLSDisplaySetHDRModeEnabled`) are Apple private APIs and are **not covered by this licence**. Whether you want to rely on them in something you ship is your call.
+- You can relicense the project later (GPL, Apache-2.0, or a commercial licence) whenever you like — there are no outside contributors whose consent would be needed today.
