@@ -1,0 +1,14 @@
+# 构建产物
+build/
+*.app/
+*.dmg
+HDRSwitch.app/
+
+# Xcode / SwiftPM
+.swiftpm/
+xcuserdata/
+DerivedData/
+
+# 系统
+.DS_Store
+._*

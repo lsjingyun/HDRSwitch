@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HDRSwitch 使用说明</title>
+<style>
+  :root{
+    --ink:#1b2029; --ink-2:#4b5566; --ink-3:#7a8698;
+    --line:#e7eaef; --line-2:#f1f4f7;
+    --paper:#ffffff; --paper-2:#fafbfd;
+    --accent:#d98230; --accent-soft:#fff8f0; --accent-line:#f0d6b8;
+    --warn:#b8452f; --warn-soft:#fdf2ef; --warn-line:#f0cfc6;
+    --ok:#2f7d63; --ok-soft:#f0f8f5; --ok-line:#c9e5da;
+    --code-bg:#161b23; --code-ink:#e6ecf5;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font:15px/1.78 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:880px;margin:0 auto;padding:64px 36px 110px}
+
+  /* ── 封面 ── */
+  .badge{
+    display:inline-block;font-size:12px;letter-spacing:.08em;font-weight:600;
+    color:var(--accent);background:var(--accent-soft);
+    border:1px solid var(--accent-line);border-radius:99px;padding:4px 12px;
+  }
+  h1{font-size:46px;line-height:1.1;letter-spacing:-.025em;margin:18px 0 14px;font-weight:700}
+  .lede{font-size:18px;line-height:1.7;color:var(--ink-2);max-width:44em;margin:0 0 22px}
+  .meta{font-size:13px;color:var(--ink-3);border-top:1px solid var(--line);padding-top:16px;margin:0}
+
+  /* ── 目录 ── */
+  .toc{background:var(--paper-2);border:1px solid var(--line);border-radius:14px;padding:20px 24px;margin:36px 0 8px}
+  .toc h4{margin:0 0 12px;font-size:12px;letter-spacing:.1em;color:var(--ink-3);font-weight:600}
+  .toc ol{margin:0;padding:0;list-style:none;columns:2;column-gap:36px}
+  .toc li{margin:0 0 7px;font-size:14px;break-inside:avoid}
+  .toc a{color:var(--ink-2);text-decoration:none;border-bottom:1px solid transparent}
+  .toc a:hover{color:var(--accent);border-bottom-color:var(--accent-line)}
+  .toc .n{display:inline-block;width:1.9em;color:var(--ink-3);font-variant-numeric:tabular-nums;font-size:12.5px}
+
+  /* ── 章节 ── */
+  h2{
+    font-size:23px;letter-spacing:-.015em;margin:64px 0 6px;padding-top:26px;
+    border-top:1px solid var(--line);display:flex;align-items:baseline;gap:14px;font-weight:650;
+  }
+  h2 .n{font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums;letter-spacing:.06em;font-weight:600}
+  h3{font-size:16.5px;margin:30px 0 8px;font-weight:650}
+  h4{font-size:14px;margin:22px 0 6px;color:var(--ink-2);font-weight:650}
+  p{margin:10px 0}
+  ul,ol{margin:10px 0;padding-left:1.5em}
+  li{margin:5px 0}
+  a{color:var(--accent)}
+
+  /* ── 表格 ── */
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}
+  th{text-align:left;font-weight:600;color:var(--ink-3);font-size:12.5px;letter-spacing:.04em;
+     padding:0 12px 8px;border-bottom:1px solid var(--line)}
+  td{padding:10px 12px;border-bottom:1px solid var(--line-2);vertical-align:top}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:nth-child(even){background:var(--paper-2)}
+  td.k{white-space:nowrap;font-weight:500}
+  .dim{color:var(--ink-3)}
+  .tag{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:99px;font-weight:600;letter-spacing:.02em;white-space:nowrap}
+  .tag.on{color:var(--ok);background:var(--ok-soft);border:1px solid var(--ok-line)}
+  .tag.off{color:var(--ink-3);background:#f4f6f9;border:1px solid var(--line)}
+
+  /* ── 提示块 ── */
+  .box{border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;
+       padding:14px 18px;margin:18px 0;font-size:14px}
+  .box.warn{border-left-color:var(--warn);background:var(--warn-soft)}
+  .box.ok{border-left-color:var(--ok);background:var(--ok-soft)}
+  .box p:first-child{margin-top:0}
+  .box p:last-child{margin-bottom:0}
+  .box b{font-weight:650}
+
+  /* ── 代码 ── */
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.8px;
+       background:var(--line-2);padding:1.5px 6px;border-radius:5px;color:#2b3444}
+  pre{background:var(--code-bg);color:var(--code-ink);padding:16px 18px;border-radius:11px;
+      overflow-x:auto;font-size:13px;line-height:1.68;margin:16px 0}
+  pre code{background:none;padding:0;color:inherit;font-size:13px}
+  pre .c{color:#7d8b9e}
+  pre .y{color:#f0b979}
+  pre .g{color:#8fd3b4}
+  kbd{font:inherit;font-size:13px;border:1px solid #d6dbe3;border-bottom-width:2px;border-radius:6px;
+      padding:1px 7px;background:#fff;color:var(--ink)}
+
+  /* ── 图示 ── */
+  figure{margin:22px 0 8px}
+  figcaption{font-size:12.5px;color:var(--ink-3);text-align:center;margin-top:10px}
+  .figure-frame{border:1px solid var(--line);border-radius:14px;padding:18px 16px 10px;background:var(--paper-2)}
+
+  hr{border:none;border-top:1px solid var(--line);margin:44px 0}
+  .foot{font-size:12.5px;color:var(--ink-3);border-top:1px solid var(--line);padding-top:20px;margin-top:56px}
+
+  @media (max-width:720px){
+    .page{padding:40px 20px 80px}
+    h1{font-size:34px}
+    .toc ol{columns:1}
+    table{font-size:13px}
+    th,td{padding-left:8px;padding-right:8px}
+  }
+  @media print{
+    body{font-size:11.5pt}
+    .page{max-width:none;padding:0}
+    .toc{display:none}
+    h2{page-break-after:avoid;break-after:avoid}
+    table,pre,figure,.box{page-break-inside:avoid;break-inside:avoid}
+    pre{background:#f4f6f9;color:#1b2029;border:1px solid var(--line)}
+    pre .c{color:#6b7789}
+    a{color:inherit;text-decoration:none}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+  <span class="badge">macOS 菜单栏工具</span>
+  <h1>HDRSwitch 使用说明</h1>
+  <p class="lede">
+    一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
+    播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
+  </p>
+  <p class="meta">版本 1.0.0 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+</header>
+
+<nav class="toc">
+  <h4>目录</h4>
+  <ol>
+    <li><span class="n">01</span><a href="#install">安装与第一次打开</a></li>
+    <li><span class="n">02</span><a href="#ui">界面：一个图标，两种点法</a></li>
+    <li><span class="n">03</span><a href="#auto">自动切换：它凭什么判断</a></li>
+    <li><span class="n">04</span><a href="#web">网页视频（B 站 / YouTube）</a></li>
+    <li><span class="n">05</span><a href="#smb">Infuse 播共享里的片源</a></li>
+    <li><span class="n">06</span><a href="#hz">为什么会掉到 60Hz、黑屏多久</a></li>
+    <li><span class="n">07</span><a href="#cli">命令行</a></li>
+    <li><span class="n">08</span><a href="#debug">出问题了怎么查</a></li>
+    <li><span class="n">09</span><a href="#faq">常见问题</a></li>
+    <li><span class="n">10</span><a href="#bye">卸载 · 已知限制</a></li>
+  </ol>
+</nav>
+
+<!-- ══════════════════ 01 ══════════════════ -->
+<h2 id="install"><span class="n">01</span>安装与第一次打开</h2>
+
+<p>DMG 打开后只有一件事要做：把 <b>HDRSwitch</b> 拖到旁边的 <b>Applications</b> 文件夹上。</p>
+
+<p>然后第一次打开会被 macOS 拦一次——因为它没有做 Apple 公证（个人工具，签名是本地 ad-hoc 的）。</p>
+
+<div class="box warn">
+  <p><b>「无法验证开发者」怎么办</b>：在「应用程序」里按住 <kbd>Control</kbd> 点 HDRSwitch → 选「打开」→ 弹窗里再点一次「打开」。只需要做一次，以后正常双击。</p>
+  <p>另一条路：系统设置 → 隐私与安全性 → 往下滚，会看到「已阻止使用 HDRSwitch」→ 点「仍要打开」。</p>
+</div>
+
+<p>打开后没有窗口、没有 Dock 图标，只有一个图标出现在<b>屏幕右上角的菜单栏</b>里。这是正常状态。</p>
+
+<!-- ══════════════════ 02 ══════════════════ -->
+<h2 id="ui"><span class="n">02</span>界面：一个图标，两种点法</h2>
+
+<table>
+  <thead><tr><th style="width:32%">操作</th><th>效果</th></tr></thead>
+  <tbody>
+    <tr><td class="k">左键点图标</td><td>立即切换 HDR。图标变亮、下方出现一条横线 = HDR 已开启</td></tr>
+    <tr><td class="k">右键点图标</td><td>打开菜单（开关、自动切换选项、选显示器、开机自启、诊断、退出）</td></tr>
+    <tr><td class="k"><kbd>⌘</kbd><kbd>⌥</kbd><kbd>H</kbd></td><td>全局快捷键，在任何一个 App 里都能切换</td></tr>
+    <tr><td class="k">再双击一次 App</td><td>不切换，只弹一条「当前状态」提示——避免误触把画面黑一下</td></tr>
+  </tbody>
+</table>
+
+<p>菜单最上面两行是当前状态，随显示器实时变化：</p>
+
+<pre><code>  LG ULTRAGEAR+ · HDR 已关闭
+    当前 2560×1440 Retina @144Hz
+  ---
+  开启 HDR
+  ---
+✓ 播放 HDR 内容时自动开启
+    自动切换：待命（未检测到播放）
+  自动切换选项  ▸
+  开机自动启动
+  复制诊断信息
+  ---
+  退出 HDRSwitch</code></pre>
+
+<h3>「自动切换选项」里的每一条</h3>
+
+<table>
+  <thead><tr><th style="width:38%">菜单项</th><th style="width:12%">默认</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="k">播放 HDR 内容时自动开启</td>
+      <td><span class="tag on">开</span></td>
+      <td>自动模式的<b>总开关</b>。关掉后它只当个手动开关用，什么都不看</td>
+    </tr>
+    <tr>
+      <td class="k">播放器识别不到片源时也开 HDR</td>
+      <td><span class="tag off">关</span></td>
+      <td>给「拿不到画质」的场景用：NAS 串流、没写色彩信息的 4K 10bit 片源。打开后这类片源一律按 HDR 处理——代价是其中的 SDR 片源也会被切</td>
+    </tr>
+    <tr>
+      <td class="k">识别不到片源时保持已有 HDR（不自动关）</td>
+      <td><span class="tag off">关</span></td>
+      <td>默认「读不到画质就按 SDR 处理，到点关掉」。打开这条则相反：只要 HDR 还开着就不去关它</td>
+    </tr>
+    <tr>
+      <td class="k">共享片源识别：点击安装</td>
+      <td class="dim">按需</td>
+      <td>装一个只读小工具，才能认出 Infuse 播<b>本机共享</b>里的文件。详见 <a href="#smb">第 05 节</a>。装好后这里显示「已就绪」</td>
+    </tr>
+    <tr>
+      <td class="k">网页视频按实测画质切换</td>
+      <td><span class="tag on">开</span></td>
+      <td>问浏览器「现在这个视频是什么画质」，读到 HDR 才切。B 站、YouTube 都走这条</td>
+    </tr>
+    <tr>
+      <td class="k">YouTube 藏起 HDR 选项时先切 HDR 解锁</td>
+      <td><span class="tag on">开</span></td>
+      <td>YouTube 在 SDR 下干脆不给 HDR 选项。这条让它先切过去，并重建一次播放器（约 1 秒，保留进度）</td>
+    </tr>
+    <tr>
+      <td class="k">解锁后直接选 4K HDR 画质</td>
+      <td><span class="tag on">开</span></td>
+      <td>解锁后再把画质直接拉到 HDR 版本里最高的一档，不用等 YouTube 自己慢慢爬</td>
+    </tr>
+    <tr>
+      <td class="k">网页视频一律按 HDR 切（读不到画质）</td>
+      <td><span class="tag off">关</span></td>
+      <td>粗暴模式：网页视频无条件切 HDR。SDR 网页也会切，一般别开</td>
+    </tr>
+    <tr>
+      <td class="k">播放结束后切回 SDR</td>
+      <td><span class="tag on">30 秒</span></td>
+      <td>可选 立即 / 10 秒 / 30 秒 / 1 分钟 / 5 分钟。选「立即」实际留 3 秒余量，免得暂停一下就来回切</td>
+    </tr>
+    <tr>
+      <td class="k">恢复自动接管</td>
+      <td class="dim">条件出现</td>
+      <td>你手动点过开关后才会出现，用来把方向盘交回给自动逻辑</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box">
+  <p><b>手动操作优先</b>：你一旦手动点了开关（菜单或快捷键），这一场播放内自动逻辑就不再插手。换片源、换播放器、或播放结束时会自动恢复。想立刻恢复：菜单 → 自动切换选项 → 恢复自动接管。</p>
+</div>
+
+<!-- ══════════════════ 03 ══════════════════ -->
+<h2 id="auto"><span class="n">03</span>自动切换：它凭什么判断</h2>
+
+<p>不是猜的，也不是看文件名（文件名只在最后兜底）。它按「能拿到多少信息」分三条路走，越往下越保守。</p>
+
+<figure>
+  <div class="figure-frame">
+  <svg viewBox="0 0 800 250" role="img" aria-label="三条判定路径">
+    <defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="#b6c0cd"/>
+      </marker>
+    </defs>
+
+    <!-- 列一 -->
+    <rect x="10" y="8" width="240" height="46" rx="9" fill="#f4f6fa" stroke="#e2e7ee"/>
+    <text x="130" y="28" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2b3444">本地文件 / 挂载盘</text>
+    <text x="130" y="44" text-anchor="middle" font-size="11" fill="#7a8698">IINA、QuickTime、VLC…</text>
+    <line x1="130" y1="56" x2="130" y2="74" stroke="#c8d1dd" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="10" y="78" width="240" height="66" rx="9" fill="#fff" stroke="#e2e7ee"/>
+    <text x="130" y="100" text-anchor="middle" font-size="11.5" fill="#4b5566">读容器的色彩标记</text>
+    <text x="130" y="117" text-anchor="middle" font-size="11.5" fill="#4b5566">mp4 走系统接口，mkv 自己解析</text>
+    <text x="130" y="134" text-anchor="middle" font-size="11.5" fill="#7a8698">没有标记就读码流的参数集</text>
+    <line x1="130" y1="146" x2="130" y2="164" stroke="#c8d1dd" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="10" y="168" width="240" height="40" rx="9" fill="#fff4e8" stroke="#e9c49a"/>
+    <text x="130" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="#b3671c">精确判定 · 能分出 HDR / SDR</text>
+
+    <!-- 列二 -->
+    <rect x="280" y="8" width="240" height="46" rx="9" fill="#f4f6fa" stroke="#e2e7ee"/>
+    <text x="400" y="28" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2b3444">本机 SMB 共享</text>
+    <text x="400" y="44" text-anchor="middle" font-size="11" fill="#7a8698">Infuse 挂载这台 Mac</text>
+    <line x1="400" y1="56" x2="400" y2="74" stroke="#c8d1dd" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="280" y="78" width="240" height="66" rx="9" fill="#fff" stroke="#e2e7ee"/>
+    <text x="400" y="100" text-anchor="middle" font-size="11.5" fill="#4b5566">播放器自己没有文件句柄</text>
+    <text x="400" y="117" text-anchor="middle" font-size="11.5" fill="#4b5566">于是反查服务端 smbd 在读哪个文件</text>
+    <text x="400" y="134" text-anchor="middle" font-size="11.5" fill="#7a8698">需要装一个只读小工具</text>
+    <line x1="400" y1="146" x2="400" y2="164" stroke="#c8d1dd" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="280" y="168" width="240" height="40" rx="9" fill="#fff4e8" stroke="#e9c49a"/>
+    <text x="400" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="#b3671c">同样精确 · 与本地文件一致</text>
+
+    <!-- 列三 -->
+    <rect x="550" y="8" width="240" height="46" rx="9" fill="#f4f6fa" stroke="#e2e7ee"/>
+    <text x="670" y="28" text-anchor="middle" font-size="12.5" font-weight="600" fill="#2b3444">NAS / 媒体服务器</text>
+    <text x="670" y="44" text-anchor="middle" font-size="11" fill="#7a8698">Plex、Emby、WebDAV、网页</text>
+    <line x1="670" y1="56" x2="670" y2="74" stroke="#c8d1dd" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="550" y="78" width="240" height="66" rx="9" fill="#fff" stroke="#e2e7ee"/>
+    <text x="670" y="100" text-anchor="middle" font-size="11.5" fill="#4b5566">拿不到文件，也拿不到画质</text>
+    <text x="670" y="117" text-anchor="middle" font-size="11.5" fill="#4b5566">只能看到「它确实在播视频」</text>
+    <text x="670" y="134" text-anchor="middle" font-size="11.5" fill="#7a8698">网页则回页面里问一句（见 04）</text>
+    <line x1="670" y1="146" x2="670" y2="164" stroke="#c8d1dd" stroke-width="1.2" marker-end="url(#ar)"/>
+    <rect x="550" y="168" width="240" height="40" rx="9" fill="#f4f6f9" stroke="#dde3ea"/>
+    <text x="670" y="193" text-anchor="middle" font-size="12" font-weight="600" fill="#5b6879">默认不切 · 可手动放开</text>
+  </svg>
+  </div>
+  <figcaption>三条路：能读到文件就精确判；读不到就只看「在不在播」，默认不切。</figcaption>
+</figure>
+
+<h3>判定规则（偏保守：宁可漏判，也不误判成 HDR）</h3>
+
+<table>
+  <thead><tr><th style="width:46%">片源的色彩标记</th><th>判定</th></tr></thead>
+  <tbody>
+    <tr><td>传输曲线是 PQ（SMPTE ST 2084）或 HLG</td><td><b>HDR</b></td></tr>
+    <tr><td>色域 BT.2020，且曲线也是 PQ / HLG</td><td><b>HDR</b></td></tr>
+    <tr><td>色域 BT.2020，但曲线是 BT.709（宽色域 SDR 母版）</td><td>SDR</td></tr>
+    <tr><td>完全没有色彩标记，且 8bit 或 1080p 及以下</td><td>SDR（HDR 必然 10bit 起步，也没有 1080p 的 HDR 片源）</td></tr>
+    <tr><td>完全没有色彩标记，4K + 10bit</td><td>未知 → 默认不切（可放开菜单里那条「识别不到片源时也开 HDR」）</td></tr>
+  </tbody>
+</table>
+
+<p>所以像「WEB-DL 的 mkv 容器里根本没写色彩信息」这种情况，它会继续往下读码流的参数集，报出 <code>HEVC · 3840×1608 · 10bit · PQ · BT.2020</code> 这样的结论，而不是看文件名瞎猜。</p>
+
+<h3>时间线大致是什么样</h3>
+
+<table>
+  <thead><tr><th style="width:26%">时刻</th><th>发生的事</th></tr></thead>
+  <tbody>
+    <tr><td class="k">打开片源</td><td>1～2 秒内识别出 HDR</td></tr>
+    <tr><td class="k">+3～4 秒</td><td>自动开 HDR（必要时先换显示模式），画面黑一下</td></tr>
+    <tr><td class="k">播放中</td><td>每秒检查一次；暂停不关，因为播放器还占着「正在播放」</td></tr>
+    <tr><td class="k">退出播放器</td><td>进入宽限期（默认 30 秒），防止暂停、切集来回切</td></tr>
+    <tr><td class="k">+30 秒</td><td>关 HDR，刷新率切回原来的 144Hz</td></tr>
+  </tbody>
+</table>
+
+<p>支持的播放器没有白名单限制——<b>任何 App，只要它打开了媒体文件就能被认出来</b>。白名单（IINA、Infuse、QuickTime、TV、VLC、Movist、Plex 等）只是额外保证「拿不到文件时」也能判断在不在播。</p>
+
+<!-- ══════════════════ 04 ══════════════════ -->
+<h2 id="web"><span class="n">04</span>网页视频（B 站 / YouTube）</h2>
+
+<p>网页里的视频，色彩信息不对外暴露。唯一的办法是让浏览器在<b>当前标签页</b>跑一小段 JavaScript，去问播放器「你现在是什么画质」。所以这条路需要两个系统授权，缺一条就静默失效。</p>
+
+<h3>先确认这两处</h3>
+
+<table>
+  <thead><tr><th style="width:30%">要什么</th><th>怎么开</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="k">自动化权限</td>
+      <td>第一次探测时系统会弹窗问「HDRSwitch 想要控制 Safari」，点<b>允许</b>。没弹或点错了：系统设置 → 隐私与安全性 → 自动化 → 勾上 HDRSwitch 下面的 Safari</td>
+    </tr>
+    <tr>
+      <td class="k">Safari 里的 JS 开关</td>
+      <td>Safari 设置 → 高级 → 勾「显示网页开发者功能」→ 切到新出现的<b>「开发者」标签页</b> → 勾「允许 Apple 事件中的 JavaScript」</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+  <p><b>Safari 27 把那个 JS 开关挪位置了</b>。它不在「开发」菜单里，在设置 → 开发者标签页。找菜单会白找半天。</p>
+  <p>Chrome / Edge / Arc 走的是另一套（AppleScript 执行 JS），只需要自动化授权，不用改浏览器设置。</p>
+</div>
+
+<h3>B 站</h3>
+<p>读播放器当前的画质码：<code>125</code> = HDR 真彩，<code>126</code> = 杜比视界，其余按 SDR 处理。画质标签显示「自动」且读不到码时不切——它宁可不动，也不猜。</p>
+
+<h3>YouTube：先有鸡还是先有蛋</h3>
+
+<p>YouTube 有个死结：<b>显示器不是 HDR 时，它压根不给你 HDR 选项</b>。所以「等检测到 HDR 再切」这条路永远等不到。工具的解法是绕开播放器，直接看页面里的播放响应——片源有没有 HDR 版本，跟你的显示器状态无关。</p>
+
+<p>查到有，就按顺序做三件事：</p>
+
+<ol>
+  <li><b>先切 HDR</b>——让 HDR 选项出现；</li>
+  <li><b>重建一次播放器</b>（约 1 秒，保留当前进度）——因为可用格式列表是播放器初始化时按当时能力建的，不重建它不会自己重算；</li>
+  <li><b>把画质拉到最高那一档</b>——实测切完 HDR 后 YouTube 会自己在 1080p 待 85 秒不上去，所以直接拉过去。</li>
+</ol>
+
+<div class="box">
+  <p><b>画质档位是按屏幕封顶的。</b>面板只有 5K 时，8K（4320p）片源会被封到 2160p——多出来的像素看不见，8K 解码和带宽却是实打实的，撑不住就会卡。</p>
+  <p><b>而且锁的是区间不是单档</b>（比如 1440p~2160p）。万一 4K 分片取不到数据，播放器还能先降到 1440p 继续播，而不是卡死等数据。另外页面里有个看门狗，卡住 10 秒会松绑、20 秒会轻推一下、40 秒放弃这次高画质尝试。</p>
+</div>
+
+<p>探针读的是<b>你眼前这一页</b>（当前标签页）。Safari 里同时开着几个视频标签时，判定的是正在看的那个，不是旁边还在响的那个。</p>
+
+<!-- ══════════════════ 05 ══════════════════ -->
+<h2 id="smb"><span class="n">05</span>Infuse 播共享里的片源</h2>
+
+<p>Infuse 播<b>本机共享</b>（「王进的 Mac mini (SMB)」这种）里的文件时，它自己进程里一个文件句柄都没有——数据是 SMB 协议流进来的。真正打开文件的是系统那头的 <code>smbd</code>，而它跑在 root 下，普通用户看不到它在读什么。</p>
+
+<p>所以要装一个只读的小工具。它唯一的功能就是：列出 <code>smbd</code> 当前打开的视频文件。拿到文件名之后，判定和本地文件完全一样。</p>
+
+<h4>怎么装</h4>
+<ol>
+  <li>DMG 里进 <b>可选组件（共享识别）</b> 文件夹；</li>
+  <li>双击 <b>安装共享识别.command</b>；</li>
+  <li>输入一次管理员密码。</li>
+</ol>
+
+<p>它会做两件事：装 <code>/usr/local/libexec/hdrswitch-smbdump</code>，并在 <code>/etc/sudoers.d/hdrswitch</code> 里<b>只放行这一条命令</b>（不接受任何参数），之后 App 免密调用它。装完回到菜单，「共享片源识别」应该显示为已就绪。</p>
+
+<div class="box">
+  <p><b>不想装也能用</b>，只是这一类片源会退化成「只知道在播」：默认不切 HDR。另一条替代路是给 HDRSwitch 开「完全磁盘访问权限」，也能读到 <code>smbd</code> 的句柄。</p>
+  <p>另外，如果 Infuse 播的是<b>别的机器</b>上的 NAS / Plex，那就跟这里无关——那种情况本来就拿不到画质。</p>
+</div>
+
+<!-- ══════════════════ 06 ══════════════════ -->
+<h2 id="hz"><span class="n">06</span>为什么会掉到 60Hz、黑屏多久</h2>
+
+<p>这不是偷懒，是 HDMI 带宽决定的。以这台 LG ULTRAGEAR+（5120×2880，HDMI 连接）实测：</p>
+
+<table>
+  <thead><tr><th style="width:52%">显示模式</th><th>系统认为支持 HDR</th></tr></thead>
+  <tbody>
+    <tr><td>2560×1440 Retina @144Hz</td><td>❌ 不支持</td></tr>
+    <tr><td>2560×1440 Retina @120Hz</td><td>❌ 不支持</td></tr>
+    <tr><td>2560×1440 Retina @60Hz</td><td>✅ 支持</td></tr>
+  </tbody>
+</table>
+
+<p>144Hz 已经把链路吃满，没有余量留给 HDR 要的 10bit 和元数据，于是 macOS 干脆把 HDR 开关藏起来——这就是「系统设置里找不到 HDR」的真正原因。</p>
+
+<p>所以它的做法是：<b>开 HDR 就切到 60Hz；关 HDR 就切回你原来的 144Hz</b>。如果你的显示器在原生模式下就支持 HDR（Studio Display、Pro Display XDR、带宽充裕的 4K 屏），它不会碰分辨率，只做纯粹的开关。</p>
+
+<h3>黑屏时间</h3>
+
+<p>这里其实有<b>两次</b>黑屏：一次换显示模式（硬件重新握手），一次系统真正切 HDR 标志。现在把它们压成了一次：</p>
+
+<pre><code><span class="c">开：</span>656ms  <span class="c">（原来 1650ms、黑两次）</span>
+<span class="c">关：</span>669ms  <span class="c">（原来 1705ms）</span>
+
+<span class="c">剩下的 ~620ms 全在面板重新握手上，属于硬件下限。</span></code></pre>
+
+<p>想再快只能不切模式，那样在这块屏上就开不了 HDR。</p>
+
+<div class="box warn">
+  <p><b>全屏播放时窗口可能跳到另一个桌面</b>——这是 macOS 换模式时的行为，软件管不了。想避免就在窗口模式下播。</p>
+</div>
+
+<!-- ══════════════════ 07 ══════════════════ -->
+<h2 id="cli"><span class="n">07</span>命令行</h2>
+
+<p>适合接快捷指令、自动化、或者排查问题时用。<code>B=/Applications/HDRSwitch.app/Contents/MacOS/HDRSwitch</code>：</p>
+
+<table>
+  <thead><tr><th style="width:22%">命令</th><th>做什么</th></tr></thead>
+  <tbody>
+    <tr><td class="k"><code>$B status</code></td><td>当前显示器、模式、是否支持 / 是否已开 HDR</td></tr>
+    <tr><td class="k"><code>$B on</code> / <code>off</code> / <code>toggle</code></td><td>开关、反转</td></tr>
+    <tr><td class="k"><code>$B list</code></td><td>列出所有显示器</td></tr>
+    <tr><td class="k"><code>$B modes</code></td><td>列出型号支持的所有显示模式（排查带宽用）</td></tr>
+    <tr><td class="k"><code>$B detect 文件</code></td><td>判断某个片源是不是 HDR，会说明依据</td></tr>
+    <tr><td class="k"><code>$B sessions</code></td><td>当前检测到的播放会话（谁在播、判成什么）</td></tr>
+    <tr><td class="k"><code>$B smb</code></td><td>共享片源识别的状态与细节</td></tr>
+    <tr><td class="k"><code>$B web</code></td><td>网页探测的开关状态、最近一次判了什么</td></tr>
+    <tr><td class="k"><code>$B why</code></td><td><b>最有用的一条</b>：一次列出显示器状态、现场识别结果、是否被手动接管、失败计数、最近日志</td></tr>
+    <tr><td class="k"><code>$B auto</code></td><td>前台跑监视器，实时看每轮判定</td></tr>
+    <tr><td class="k"><code>$B menu</code></td><td>把菜单结构打印出来（含勾选状态）</td></tr>
+  </tbody>
+</table>
+
+<div class="box warn">
+  <p>命令行里跑 <code>sessions</code> / <code>why</code> 时，<b>网页探测一定失败</b>。不是坏了：系统按「谁发起的」判授权，终端进程没有这个权限，只有菜单栏那个 App 进程有。</p>
+  <p>想看 App 刚刚判了什么：<code>defaults read com.wangjin.hdrswitch autoLastSession</code>，里面带着完整依据。</p>
+</div>
+
+<!-- ══════════════════ 08 ══════════════════ -->
+<h2 id="debug"><span class="n">08</span>出问题了怎么查</h2>
+
+<p>按这个顺序，基本三步内能定位：</p>
+
+<ol>
+  <li><b>菜单 → 复制诊断信息</b>，粘出来看一眼。里面是显示器状态 + 当前识别结果。</li>
+  <li><b><code>$B why</code></b>。它会直接告诉你「为什么没切」：没检测到播放？判成了 SDR？还是被你手动接管了？</li>
+  <li><b>看日志</b>。路径 <code>~/Library/Logs/HDRSwitch.log</code>，超过 512KB 自动清空，不会吃硬盘。</li>
+</ol>
+
+<h4>日志里值得看的几行</h4>
+
+<table>
+  <thead><tr><th style="width:26%">行首</th><th>怎么读</th></tr></thead>
+  <tbody>
+    <tr><td class="k"><code>详情:</code></td><td>判定依据。写着片源分辨率、色彩、画质、视频 id。比如 <code>3840×2160 · smpte2084 · quality hd2160</code></td></tr>
+    <tr><td class="k"><code>健康:</code></td><td>网页播放有没有卡住。卡住时是 <code>adv=0 buf=0</code>（画面不前进、缓冲为 0）</td></tr>
+    <tr><td class="k"><code>切换耗时</code></td><td>这次开关用了多少毫秒，分段写着时间花在哪</td></tr>
+    <tr><td class="k"><code>actuate</code></td><td>真正动手切了（开或关）</td></tr>
+  </tbody>
+</table>
+
+<p>前三行默认就写，不需要开调试。要每轮判定都记（会刷屏，排查完记得关）：</p>
+
+<pre><code>defaults write com.wangjin.hdrswitch debugLog -bool true
+<span class="c"># 重启 App 生效</span>
+defaults write com.wangjin.hdrswitch debugLog -bool false</code></pre>
+
+<!-- ══════════════════ 09 ══════════════════ -->
+<h2 id="faq"><span class="n">09</span>常见问题</h2>
+
+<h3>系统设置里根本找不到 HDR 开关？</h3>
+<p>因为你现在的刷新率把带宽吃满了。切到 60Hz 再看就有了——这也是这个工具存在的理由。<a href="#hz">见第 06 节</a>。</p>
+
+<h3>播 HDR 片源没切？</h3>
+<p>依次排三件事：</p>
+<ul>
+  <li>「播放 HDR 内容时自动开启」是不是被关掉了；</li>
+  <li>片源来自 NAS / 网络串流？那种情况拿不到画质，默认不切；</li>
+  <li>你刚才是不是手动点过开关——手动接管期间自动逻辑不插手。</li>
+</ul>
+<p>命令行的 <code>why</code> 会直接说出是哪一条。</p>
+
+<h3>播 SDR 反而切了？</h3>
+<p>检查这两条有没有被打开：「网页视频一律按 HDR 切」「播放器识别不到片源时也开 HDR」。这两条都是「读不到画质就硬切」，开着就一定会误切 SDR。</p>
+
+<h3>网页视频一点反应都没有？</h3>
+<p>九成是那两个授权之一没就位（自动化 / Safari 的 JS 开关）。跑 <code>$B web</code>，它会直说卡在哪一步。</p>
+
+<h3>YouTube 切了 HDR，画质却停在 1080p？</h3>
+<p>看「解锁后直接选 4K HDR 画质」有没有开。另外 8K 片源会被封到 2160p，这是有意的——不是没拉到顶。</p>
+
+<h3>切完 HDR 之后断流 / 卡住不动？</h3>
+<p>这是画质锁导致的取不到数据，不是网速也不是解码问题。现在有看门狗会自动松绑，通常十几秒内自己恢复。如果反复出现，把那个视频链接发我，日志里 <code>健康:</code> 那行能看出是哪一步。</p>
+
+<h3>暂停了，HDR 一直开着不关？</h3>
+<p>这是设计。判断依据是「播放器还在占着正在播放」，不是「画面在动」。退出播放器才会走宽限期、然后关掉。</p>
+
+<h3>重启 App 后 HDR 一直开着？</h3>
+<p>如果 App 是在播放中途被重启的，它会续上宽限期，避免「明明没在播却一直停在 HDR」。手动切一次就恢复正常。</p>
+
+<h3>HDR 模式下我自己改了分辨率，状态不对了？</h3>
+<p>切一次 HDR（开→关，或关→开）就会重新同步。</p>
+
+<!-- ══════════════════ 10 ══════════════════ -->
+<h2 id="bye"><span class="n">10</span>卸载 · 已知限制</h2>
+
+<h3>卸载</h3>
+<p>先从菜单退出，然后：</p>
+<pre><code>rm -rf /Applications/HDRSwitch.app
+defaults delete com.wangjin.hdrswitch
+
+<span class="c"># 装过共享识别小工具的话，一并清掉</span>
+sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code></pre>
+<p>如果开了「开机自动启动」，退出前先在菜单里关掉它。</p>
+
+<h3>已知限制</h3>
+<ul>
+  <li>只在 <b>Apple Silicon + macOS 26/27</b> 上验证过。用的是系统私有接口，大版本升级后可能失效——重编一次通常就好。</li>
+  <li>部分显示器（尤其经过转接器 / 扩展坞连接的）压根不回报 HDR 能力，那种情况没有任何软件能打开。</li>
+  <li>Infuse 播<b>远程</b> NAS / 媒体服务器：拿不到画质，默认不切。要切只能打开「播放器识别不到片源时也开 HDR」，代价是 SDR 片源也会被切。</li>
+  <li>网页探测依赖页面结构。B 站改版、YouTube 换播放器实现，都可能让画质读不到——读不到就不切，不会误切。</li>
+  <li>切换必然黑一下（约 0.7 秒）并伴随一次显示模式变更，这是 macOS 的行为。</li>
+</ul>
+
+<p class="foot">
+  HDRSwitch 1.0.0 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。
+</p>
+
+</div>
+</body>
+</html>
