@@ -15,20 +15,24 @@ macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片�
 - 网页视频（B 站 / YouTube）让浏览器跑一小段 JS 读实测画质；YouTube「SDR 下不给 HDR 选项」的死结也解了
 - 切一次只黑一次屏，约 0.7 秒
 
+## 下载
+
+**[HDRSwitch-1.0.0.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.0.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel）
+
+打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地 ad-hoc 签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
+
 ## 要求
 
-macOS 13 及以上。通用二进制（Apple Silicon + Intel），实测环境为 macOS 26/27 + M4 Pro。
+macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连）。
 
-## 安装
+## 自己编译
 
-自己编译（只需要 Xcode 命令行工具）：
+只需要 Xcode 命令行工具：
 
 ```bash
 ./build.sh      # → HDRSwitch.app，双击即用
 ./package.sh    # → build/HDRSwitch-1.0.0.dmg，可分发
 ```
-
-用的是本地 ad-hoc 签名，没有 Apple 公证，所以第一次打开会被拦一次：**按住 Control 点它 → 打开**。
 
 面向使用者的完整说明在 [`使用说明.html`](使用说明.html)（单文件、无外部依赖，浏览器打开，⌘P 可存 PDF）。
 下面这份偏实现笔记——原理、踩过的坑、验证数据。
