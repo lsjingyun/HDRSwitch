@@ -34,7 +34,7 @@ macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连�
 ./package.sh    # → build/HDRSwitch-1.0.0.dmg，可分发
 ```
 
-面向使用者的完整说明在 [`使用说明.html`](使用说明.html)（单文件、无外部依赖，浏览器打开，⌘P 可存 PDF）。
+面向使用者的完整说明：**<https://lsjingyun.github.io/HDRSwitch/>**（即 [`docs/index.html`](docs/index.html)，单文件、无外部依赖，DMG 里也带一份，⌘P 可存 PDF）。
 下面这份偏实现笔记——原理、踩过的坑、验证数据。
 
 ## 使用

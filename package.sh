@@ -145,8 +145,8 @@ HDRSwitch ${VERSION}
 EOT
 
 # 使用说明（完整文档，跟着安装包一起走）
-if [ -f 使用说明.html ]; then
-    cp 使用说明.html "$STAGE/"
+if [ -f docs/index.html ]; then
+    cp docs/index.html "$STAGE/使用说明.html"
 fi
 
 echo "==> 4/5 生成磁盘映像"
