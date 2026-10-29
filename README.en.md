@@ -1,8 +1,8 @@
 # HDRSwitch
 
-A tiny macOS menu bar utility: **one-click HDR for your external display**. It switches HDR on when an HDR title starts playing, switches it off when you stop, and gives you your refresh rate back.
-
 [中文](README.md) · **English**
+
+A tiny macOS menu bar utility: **one-click HDR for your external display**. It switches HDR on when an HDR title starts playing, switches it off when you stop, and gives you your refresh rate back.
 
 | HDR off | HDR on |
 | :--: | :--: |
