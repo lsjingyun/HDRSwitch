@@ -336,6 +336,10 @@
 
 <p>支持的播放器没有白名单限制——<b>任何 App，只要它打开了媒体文件就能被认出来</b>。白名单（IINA、Infuse、QuickTime、TV、VLC、Movist、Plex 等）只是额外保证「拿不到文件时」也能判断在不在播。</p>
 
+<div class="box">
+  <p><b>下载器不算播放器。</b>qBittorrent、Transmission、迅雷、Motrix 这类工具会长时间持有 <code>.mkv</code> 的句柄——下载中、做种中——但它们从不播放。工具按 bundle id 和名称把它们整个排除，另有一层兜底：<b>文件正在变大、或刚写完 4 秒以内，都不算播放</b>。所以一边下 HDR 片源一边看别的，屏幕不会被切过去。</p>
+</div>
+
 <!-- ══════════════════ 04 ══════════════════ -->
 <h2 id="web"><span class="n">04</span>网页视频（B 站 / YouTube）</h2>
 
@@ -511,6 +515,9 @@ defaults write com.wangjin.hdrswitch debugLog -bool false</code></pre>
 
 <h3>播 SDR 反而切了？</h3>
 <p>检查这两条有没有被打开：「网页视频一律按 HDR 切」「播放器识别不到片源时也开 HDR」。这两条都是「读不到画质就硬切」，开着就一定会误切 SDR。</p>
+
+<h3>挂着 qBittorrent 下片，HDR 自己开了？</h3>
+<p>下载器会长时间攥着 <code>.mkv</code> 的句柄（下载中、做种中），以前会被误当成「在播 HDR」。现在的构建里下载器整个不参与判定，认不出的客户端还有「文件正在变大就不算播放」这条兜底。确认方法：<code>$B why</code> 里会多出一行「已忽略下载器」，列出被拦下的进程。</p>
 
 <h3>网页视频一点反应都没有？</h3>
 <p>九成是那两个授权之一没就位（自动化 / Safari 的 JS 开关）。跑 <code>$B web</code>，它会直说卡在哪一步。</p>

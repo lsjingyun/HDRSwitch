@@ -402,6 +402,33 @@ final class MediaProbe {
         return result
     }
 
+    // MARK: 正在写入判定
+
+    /// 文件此刻是不是「还在被写入」。播放器打开片源只读，不会让文件变大；
+    /// 下载器（qBittorrent 关了「.!qB 临时后缀」时就是最终文件名）、拷贝、转码会。
+    /// 用它兜住那些认不出名字的下载客户端。
+    private static var sizeWatch: [String: (size: Int64, at: Date)] = [:]
+    private static let sizeLock = NSLock()
+
+    static func isBeingWritten(_ path: String) -> Bool {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        guard let attrs else { return false }
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs[.modificationDate] as? Date) ?? .distantPast
+        let now = Date()
+
+        sizeLock.lock()
+        let prev = sizeWatch[path]
+        if sizeWatch.count > 300 { sizeWatch.removeAll() }
+        sizeWatch[path] = (size, now)
+        sizeLock.unlock()
+
+        // 上一轮（约 1 秒前）大小不同 → 正在下载
+        if let prev, prev.size != size, now.timeIntervalSince(prev.at) < 20 { return true }
+        // 刚写完的几秒内也别算播放：下载器常有「下完立刻播」的一串动作
+        return now.timeIntervalSince(mtime) < 4
+    }
+
     private func probeUncached(path: String) -> ProbeResult {
         let ext = (path as NSString).pathExtension.lowercased()
         if Self.avExtensions.contains(ext) {
@@ -1146,6 +1173,31 @@ enum PlaybackWatcher {
         "com.sodaplayer.SodaPlayer"
     ]
 
+    /// 下载器 / 传输工具：长期持有媒体文件句柄（下载中、做种中），但从不播放。
+    /// 不排除的话，一下 HDR 片源就会被当成「在播 HDR」，屏幕被切过去。
+    private static let downloaderIDs: Set<String> = [
+        "org.qbittorrent.qbittorrent",
+        "com.transmissionbt.transmission",
+        "org.deluge-torrent.deluge",
+        "com.bittorrent.utorrent",
+        "com.bitcomet.bitcomet",
+        "com.thunder.thunder",
+        "com.xunlei.thunder",
+        "net.motrix.motrix",
+        "com.folx.folx",
+        "com.downie.downie",
+        "org.freedownloadmanager.fdm",
+        "com.baidu.baidunetdisk",
+        "com.alibaba.aliyundrive"
+    ]
+
+    /// 名称兜底：认不出的下载客户端（含各种魔改版、命令行版）也能拦住
+    private static let downloaderKeywords: [String] = [
+        "torrent", "transmission", "deluge", "bitcomet", "aria2", "motrix",
+        "thunder", "xunlei", "迅雷", "qbittorrent", "utorrent", "folx",
+        "downie", "netdisk", "网盘", "下载"
+    ]
+
     /// 浏览器：网页视频的色彩信息在进程内存里，外部读不到，
     /// 因此这类 App 只有「拿到本地片源」时才能精确判定 HDR/SDR。
     static let streamingApps: [String] = [
@@ -1166,8 +1218,20 @@ enum PlaybackWatcher {
         "com.apple.Music"
     ]
 
+    /// 上一轮被排除的下载器名称，只给 `why` / `sessions` 显示用
+    private(set) static var ignoredApps: [String] = []
+    private static let ignoredLock = NSLock()
+
+    static func isDownloader(_ app: NSRunningApplication, id: String) -> Bool {
+        if downloaderIDs.contains(id.lowercased()) { return true }
+        let hay = ((app.localizedName ?? "") + " " + id + " "
+                   + (app.executableURL?.lastPathComponent ?? "")).lowercased()
+        return downloaderKeywords.contains { hay.contains($0) }
+    }
+
     static func sessions(includeStreaming: Bool = true) -> [MediaSession] {
         var result: [MediaSession] = []
+        var skipped: [String] = []
 
         // 候选 = 白名单里的播放器 + 任何第三方 App。
         // 后者是为了兼容列表之外的播放器（Movist Pro / Elmedia / 未来新出的），
@@ -1180,8 +1244,18 @@ enum PlaybackWatcher {
                 // 系统 App 太多且不会放本地视频，跳过以免每个都去查句柄
                 if id.hasPrefix("com.apple.") { return nil }
                 if id == Bundle.main.bundleIdentifier { return nil }
+                // 下载器永不播放，直接排除：它们会一直开着 .mkv 的句柄
+                if isDownloader(app, id: id) {
+                    skipped.append(app.localizedName ?? id)
+                    return nil
+                }
                 return (app, .player)
             }
+
+        ignoredLock.lock()
+        ignoredApps = skipped
+        ignoredLock.unlock()
+
         guard !candidates.isEmpty else { return [] }
 
         // 电源断言一次性取回，避免每个 App 查一遍
@@ -1215,7 +1289,7 @@ enum PlaybackWatcher {
             guard activity > 0 else { continue }
 
             let mediaPaths = ProcFiles.openPaths(pid: pid).filter {
-                MediaProbe.mediaExtensions.contains(($0 as NSString).pathExtension.lowercased())
+                shouldCountAsMedia($0)
             }
 
             if !mediaPaths.isEmpty {
@@ -1235,7 +1309,7 @@ enum PlaybackWatcher {
             // 播放器进程里没有句柄，但文件可能来自「本机 SMB 共享」：
             // 真正 open() 它的是服务端 smbd，从这里取（需要完全磁盘访问权限）
             if playing && item.kind == .player {
-                let smbPaths = SMBService.openMediaPaths()
+                let smbPaths = SMBService.openMediaPaths().filter { shouldCountAsMedia($0) }
                 if !smbPaths.isEmpty {
                     var best: MediaSession?
                     for path in smbPaths {
@@ -1283,5 +1357,13 @@ enum PlaybackWatcher {
         case .unknown: return 1
         case .sdr: return 0
         }
+    }
+
+    /// 是不是「一个正在被播放的片源」。除了扩展名，还要排掉正在写入的文件：
+    /// 下载器即使认不出来，它手上的文件也在不停变大，那不是播放。
+    private static func shouldCountAsMedia(_ path: String) -> Bool {
+        guard MediaProbe.mediaExtensions.contains((path as NSString).pathExtension.lowercased())
+        else { return false }
+        return !MediaProbe.isBeingWritten(path)
     }
 }

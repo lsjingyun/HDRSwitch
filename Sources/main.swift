@@ -867,6 +867,9 @@ func runCLI(_ command: String) -> Never {
         for s in list {
             print("\(s.description)  —  \(s.detail)  [\(s.basis)]")
         }
+        if !PlaybackWatcher.ignoredApps.isEmpty {
+            print("已忽略下载器: \(PlaybackWatcher.ignoredApps.joined(separator: "、"))（持有文件句柄，但不播放）")
+        }
         exit(0)
 
     case "smb":
@@ -933,6 +936,9 @@ func runCLI(_ command: String) -> Never {
             let file = s.path.map { ($0 as NSString).lastPathComponent } ?? "无本地片源（网络串流/媒体库）"
             print("  \(s.appName)：\(file)")
             print("     判定=\(s.verdict.label)   依据=\(s.detail)   可信度=\(s.basis)")
+        }
+        if !PlaybackWatcher.ignoredApps.isEmpty {
+            print("  已忽略下载器：\(PlaybackWatcher.ignoredApps.joined(separator: "、"))（它们会一直开着片源文件，但不播放）")
         }
         print("")
 
