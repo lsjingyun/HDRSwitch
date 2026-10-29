@@ -332,4 +332,4 @@ defaults delete com.wangjin.hdrswitch
 两点顺带说清：
 
 - 工具调用的那些接口（SkyLight 的 `CoreDisplay_*` / `SLSDisplaySetHDRModeEnabled`）是 Apple 的私有 API，**不属于本项目授权范围**。要不要在上架软件里用它们，得你自己判断。
-- 想让 App Store 上架、或改成别的协议（GPL / Apache-2.0），随时可以改；目前没有外部贡献者，不存在需要征得同意的人。
+- 以后想换协议（GPL / Apache-2.0 / 双许可商用）随时可以改；目前没有外部贡献者，不存在需要逐个征得同意的人。
