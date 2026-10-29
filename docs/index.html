@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.0.1 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.0.2 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -562,6 +562,12 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 <!-- ══════════════════ 11 ══════════════════ -->
 <h2 id="log"><span class="n">11</span>版本记录</h2>
 
+<h3>1.0.2 · 2026-10-30</h3>
+<ul>
+  <li><b>图标现在会出现在 Launchpad 里。</b>之前 Info.plist 里标了 <code>LSUIElement</code>（「菜单栏专用 App」），macOS 会因此把 App 从 Launchpad 的图标列表和「应用程序」页里一并排除——只有 Spotlight 搜得到，翻是翻不到的。现在这个标记去掉了，改成启动后用 <code>setActivationPolicy(.accessory)</code> 收掉 Dock 图标：<b>行为完全一样</b>（没有 Dock 图标、不进 ⌘Tab、不抢焦点），但 Launchpad 和「应用程序」里能正常看到、正常点开。</li>
+  <li>编译产物从项目根目录挪到 <code>build/</code>。项目里的 <code>.app</code> 会被 Spotlight 收进 Launchpad，编译几次就会看到好几个重复图标——这也是「Launchpad 里出现 3 个 HDRSwitch」的原因。</li>
+</ul>
+
 <h3>1.0.1 · 2026-10-30</h3>
 <ul>
   <li><b>修掉「下载器被当成播放器」</b>：qBittorrent 下 HDR 片源时，屏幕会被误切到 HDR。下载器会长时间持有 <code>.mkv</code> 句柄（下载中、做种中）却从不播放，现在它们整个不参与判定（含 Transmission、迅雷、Motrix、Folx、Downie、FDM、网盘客户端等），另加「文件正在变大、或刚写完 4 秒以内不算播放」的兜底。<code>$B why</code> 会多打一行「已忽略下载器」。</li>
@@ -574,7 +580,7 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 </ul>
 
 <p class="foot">
-  HDRSwitch 1.0.1 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。
+  HDRSwitch 1.0.2 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。
 </p>
 
 </div>
