@@ -1,5 +1,7 @@
 # HDRSwitch
 
+**中文** · [English](README.en.md)
+
 macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片源时自己打开，播完自己关掉，顺手把刷新率还给你。
 
 | HDR 关闭 | HDR 开启 |
