@@ -21,7 +21,7 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>LSUIElement</key>
-	<true/>
+	<false/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>读取浏览器当前播放的网页视频画质（是否 HDR），用于自动开关 HDR。</string>
 	<key>NSHighResolutionCapable</key>

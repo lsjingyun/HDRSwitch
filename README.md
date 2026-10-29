@@ -30,8 +30,8 @@ macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连�
 只需要 Xcode 命令行工具：
 
 ```bash
-./build.sh      # → HDRSwitch.app，双击即用
-./package.sh    # → build/HDRSwitch-1.0.0.dmg，可分发
+./build.sh      # → build/HDRSwitch.app，双击即用
+./package.sh    # → build/HDRSwitch-1.0.1.dmg，可分发
 ```
 
 面向使用者的完整说明：**<https://lsjingyun.github.io/HDRSwitch/>**（即 [`docs/index.html`](docs/index.html)，单文件、无外部依赖，DMG 里也带一份，⌘P 可存 PDF）。

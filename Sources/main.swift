@@ -410,6 +410,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var napToken: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 不用 LSUIElement（那会让 App 从 Launchpad 的图标列表里消失，只能靠搜索找到），
+        // 改成启动后把激活策略设成 .accessory：一样没有 Dock 图标、不抢焦点、不进 ⌘Tab，
+        // 但 Launchpad / 应用程序文件夹里能正常看到图标。
         NSApp.setActivationPolicy(.accessory)
 
         // 关键：菜单栏小工具在后台时会被 App Nap 限流，

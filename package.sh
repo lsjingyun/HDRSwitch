@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="HDRSwitch"
+APP_PATH="build/${APP_NAME}.app"
 VOL_NAME="HDRSwitch"
 
 # ── 版本号（取自 Info.plist）
@@ -17,7 +18,7 @@ STAGE="build/dmg"
 echo "==> 1/5 编译"
 ./build.sh >/dev/null
 
-if [ ! -d "${APP_NAME}.app" ]; then
+if [ ! -d "$APP_PATH" ]; then
     echo "✗ 编译失败：找不到 ${APP_NAME}.app"
     exit 1
 fi
@@ -41,17 +42,18 @@ for ARCH in arm64 x86_64; do
 done
 if [ "$ok_uni" = "1" ]; then
     lipo -create -output "$UNI_BIN" "$UNI_DIR/arm64" "$UNI_DIR/x86_64" 2>/dev/null && \
-        cp "$UNI_BIN" "${APP_NAME}.app/Contents/MacOS/${APP_NAME}" && \
-        codesign --force --sign - --timestamp=none "${APP_NAME}.app" >/dev/null 2>&1 && \
-        echo "    已合成为通用二进制：$(lipo -archs "${APP_NAME}.app/Contents/MacOS/${APP_NAME}")"
+        cp "$UNI_BIN" "$APP_PATH/Contents/MacOS/${APP_NAME}" && \
+        codesign --force --sign - --timestamp=none "$APP_PATH" >/dev/null 2>&1 && \
+        echo "    已合成为通用二进制：$(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
 else
-    echo "    使用本机架构：$(lipo -archs "${APP_NAME}.app/Contents/MacOS/${APP_NAME}")"
+    echo "    使用本机架构：$(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
 fi
 
 echo "==> 3/5 准备内容"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-cp -R "${APP_NAME}.app" "$STAGE/"
+touch build/.metadata_never_index
+cp -R "$APP_PATH" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
 # 共享片源识别（可选）：把特权小工具和安装脚本一并放进来，
@@ -166,7 +168,7 @@ hdiutil verify "$DMG" -quiet 2>&1 | grep -v deprecated || true
 echo ""
 echo "==> 完成"
 ls -lh "$DMG" | awk '{print "    " $9 "  " $5}'
-echo "    架构: $(lipo -archs "${APP_NAME}.app/Contents/MacOS/${APP_NAME}")"
-echo "    签名: $(codesign -dv "${APP_NAME}.app" 2>&1 | grep -m1 'Signature' || echo 'ad-hoc')"
+echo "    架构: $(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
+echo "    签名: $(codesign -dv "$APP_PATH" 2>&1 | grep -m1 'Signature' || echo 'ad-hoc')"
 echo "    内容:"
 (cd "$STAGE" && find . -maxdepth 2 -not -path "./HDRSwitch.app/*" | sed 's|^\./|      |' | sort)

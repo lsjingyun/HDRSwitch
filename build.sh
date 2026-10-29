@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="HDRSwitch.app"
+APP="build/HDRSwitch.app"   # 放进 build/：该目录标了 .metadata_never_index，不会被 Launchpad 收成重复图标
 echo "==> 编译中…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -23,5 +23,5 @@ codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
 
 echo "==> 完成: $(pwd)/$APP"
 echo
-echo "双击打开即可，图标会出现在菜单栏右上角。"
-echo "想放进 /Applications 就执行: open . 然后拖过去。"
+echo "双击 $APP 即可，图标会出现在菜单栏右上角。"
+echo "想放进 /Applications 就执行: cp -R $APP /Applications/"
