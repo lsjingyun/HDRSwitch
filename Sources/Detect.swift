@@ -350,6 +350,7 @@ enum Evidence {
     case colorTags      // 容器 Colour 元素 / SPS-VUI / AVFoundation 色彩标记
     case filenameHint   // 文件名里的 HDR 字样
     case webProbe       // 回网页里读到的清晰度标签 / 播放器色彩信息
+    case appLog         // 播放器自己写进日志的内容级 HDR 判定（腾讯视频）
     case none           // 无从判断（网页流、网络串流）
 
     var label: String {
@@ -357,6 +358,7 @@ enum Evidence {
         case .colorTags: return "实读色彩标记"
         case .filenameHint: return "文件名推断"
         case .webProbe: return "网页实测"
+        case .appLog: return "播放器日志"
         case .none: return "无法判定"
         }
     }
@@ -1131,6 +1133,428 @@ struct BitReader {
     }
 }
 
+// MARK: - 腾讯视频（QQLive）在播内容的画质
+//
+// 腾讯视频 Mac 版是原生播放器（TVKPlayer 内核），既没有本地文件句柄，也不是
+// 网页 —— 「读容器色彩」和「回页面问一句」这两条路都用不上。
+//
+// 但它的播放内核会把**内容级**的 HDR 判定写进自己的日志：
+//     frame hdr info changed, ... ==> hdr type=HDRVivid, hdr mapping type=HardwareHDR10StaticMapping
+//     updateSubtitleRenderMode. isHDRVideo=1 fileid=322108
+// SDR 内容对应 `hdr type=None` / `isHDRVideo=0`。
+//
+// 要特别小心日志开头那一批 `HDR Cap Query: HDRVivid ... -> Supported`：那是
+// **设备能力查询**（这台机器支不支持 HDR），跟正在放什么内容毫无关系。
+// 拿它当判据的话，只要打开腾讯视频就会判成 HDR。所以这里只认上面两种
+// 「内容级」记录，能力查询的行一个字都不看。
+
+enum TencentVideoProbe {
+    static let bundleID = "com.tencent.tenvideo"
+
+    /// 第一次看到某个日志时，从文件尾部回读这么多建立基线。
+    ///
+    /// 必须覆盖整个文件：播放内核的单个日志上限约 5MB，而「内容判定」可能
+    /// 只在开播那一刻打一条 —— 只读尾部 2MB 的话，播久了那条判定就落到窗口
+    /// 外面，进程重启后又从头判，于是「明明在播 HDR 却报读不到」。全读 5MB
+    /// 只在首次见到该文件时发生一次，之后都走增量。
+    private static let seedBytes: UInt64 = 8_000_000
+
+    /// 实例级 HDR 判定算数多久。
+    ///
+    /// 8 秒：关片时腾讯视频经常不发 `kStop`（直接切到别的内容），这时只能靠
+    /// 「这个实例不再输出日志」来判定。窗口给太长，HDR 就会一直挂着不回落。
+    /// 暂停不怕 —— 暂停时由内容标志 `isHDRVideo` 兜住。
+    private static let hdrWindow: TimeInterval = 8
+
+    /// 内容标志 `isHDRVideo=1` 的有效期。
+    ///
+    /// 这个标志只在「内容切换」时打一条，不随时间刷新，所以不能给短窗口
+    /// （暂停半小时也不该掉色）。关片 / 换片时它会立刻被刷成 0，那时
+    /// `flagAt` 会被清空，走不到这里。10 分钟只是兜底「App 异常退出、
+    /// 没来得及刷 0」的残留，和日志文件的活跃窗口一致。
+    private static let flagLifetime: TimeInterval = 600
+
+    /// 一个播放实例的状态。
+    ///
+    /// 腾讯视频在**同一个日志文件**里同时输出十几个播放器实例：首页每个推荐位
+    /// 各有一个自动预览，详情页预览一个，正式播放一个。活跃时有 1000+ 行/实例。
+    /// 它们的 `hdr type` 判定混在一起 —— 正片在 `tpcore24` 判出 HDRVivid，
+    /// 十几秒后首页预览 `tpcore26` 又打一条 `None`。如果只取「最后一条判定」，
+    /// 正片的 HDR 会被预览的 None 盖掉，永远判成 SDR。
+    ///
+    /// 所以按实例隔离：每个实例自己一条判定、自己的停止时间，最后再看谁在播。
+    private struct InstanceState {
+        /// 最后一次内容判定的时间和结论
+        var at: Date?
+        var verdict: HDRVerdict?
+        var detail = ""
+        /// 该实例最后一次出现在日志里的时间 —— 判定只在「变化时」打一条，
+        /// 播十分钟也不会再打，所以判断「还在不在播」只能看这个。
+        var lastSeen: Date?
+        /// 解码器销毁 / 停止播放
+        var stopped: Date?
+    }
+
+    /// 每个日志文件的续读状态。`offset` 是已经消费到的位置。
+    private struct FileState {
+        var offset: UInt64 = 0
+        var seeded = false
+        /// `tpplayerN_tpcoreM` → 该实例的状态
+        var instances: [String: InstanceState] = [:]
+        /// 全局兜底：`isHDRVideo` 那行不带实例标识，只能整个文件记一条
+        var verdict: HDRVerdict?
+        var detail = ""
+        var at: Date?
+        /// `isHDRVideo=1` —— 内容层面的 HDR 标志，单独记。
+        ///
+        /// 这跟 `hdr type` 是两件事：`hdr type` 反映**渲染输出**，显示器没开
+        /// HDR 时播放器会把 HDR 内容 tone-map 成 SDR，`hdr type` 就报 None；
+        /// 而 `isHDRVideo` 说的是**这一片有没有 HDR 版本**，跟显示器无关。
+        /// 正因如此，它才是「该不该开 HDR」的正确判据 —— 拿 `hdr type` 当判据
+        /// 会锁死：不开 HDR 就读不到 HDR，读不到 HDR 就不开 HDR。
+        ///
+        /// **注意**：这个标志约每 30 秒重刷一次，关片 / 换片时会立刻被刷成 0。
+        /// 所以它必须能被「取消」—— 只记时间不给取消，关掉 HDR 片之后它会靠
+        /// 一段新鲜期一直成立，屏幕也就一直不回落。
+        var flagAt: Date?
+        /// 见过 `isHDRVideo` 行没有 —— 决定「`hdr type=None` 敢不敢当真」
+        var flagSeen = false
+        /// 最近一次「解码器销毁 / 停止播放」的时间，比判定晚就说明片子已停
+        var stopped: Date?
+    }
+
+    private static var files: [String: FileState] = [:]
+
+    private static var cache: (at: Date, result: ProbeResult?)?
+    private static let lock = NSLock()
+
+    /// 日志目录读得到吗？
+    ///
+    /// 腾讯视频把日志写在自己的沙盒容器里，而 macOS 会拦「读别的 App 容器」——
+    /// 需要「完全磁盘访问权限」。从终端跑 CLI 会继承终端的权限所以一切正常，
+    /// 菜单栏 App 自己跑就一个文件都看不到，这个差异极难靠猜定位，所以要显式暴露。
+    static func canRead() -> Bool {
+        (try? FileManager.default.contentsOfDirectory(atPath: logDir)) != nil
+    }
+
+    /// 日志目录（App 沙盒容器内，同用户可读）
+    static var logDir: String {
+        (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Containers/com.tencent.tenvideo/Data/Library/Logs")
+    }
+
+    /// 日志行首时间戳（`2026-10-30 20:10:08.885`）→ Date。只解析命中的那几行，
+    /// 开销可以忽略；一行几万条的全量解析才需要担心。
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        return f
+    }()
+
+    private static func time(of line: String) -> Date? {
+        guard line.count >= 23 else { return nil }
+        return stamp.date(from: String(line.prefix(23)))
+    }
+
+    /// 播放内核是「一个播放实例一个日志文件」—— 首页预览、详情页预览、正式
+    /// 播放各开一个，同时躺着好几个。只挑 mtime 最新的那个会挑错（刚关掉预览
+    /// 窗口，它的文件反而最新）。所以把最近改过的都读一遍，取时间最靠后的判定。
+    private static func recentLogs(within seconds: TimeInterval = 600) -> [String] {
+        let dir = logDir
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: dir)
+        } catch {
+            // 读不到目录时把原因记下来：最常见的是没有「完全磁盘访问权限」——
+            // 从终端跑 CLI 会继承终端的权限，所以命令行一切正常、菜单栏 App 却
+            // 一个文件都看不到，这个差异极难靠猜定位。
+            if Log.enabled { Log.write("  腾讯日志目录不可读: \(error.localizedDescription) · \(dir)") }
+            return []
+        }
+        let files = names
+        let now = Date()
+        var out: [(path: String, at: Date)] = []
+        for f in files where f.hasPrefix("TVKPlayer SDK") && f.hasSuffix(".log") {
+            let p = (logDir as NSString).appendingPathComponent(f)
+            guard let a = try? FileManager.default.attributesOfItem(atPath: p),
+                  let m = a[.modificationDate] as? Date,
+                  now.timeIntervalSince(m) < seconds else { continue }
+            out.append((p, m))
+        }
+        return out.sorted { $0.at > $1.at }.prefix(4).map(\.path)
+    }
+
+    /// 从 `from` 读到文件末尾，返回文本和新的末尾位置。
+    private static func readChunk(_ h: FileHandle, from: UInt64, to end: UInt64) -> String? {
+        guard end > from else { return "" }
+        do { try h.seek(toOffset: from) } catch { return nil }
+        guard let data = try? h.read(upToCount: Int(end - from)) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// 当前播放内容的画质。读不到（日志不在 / 没权限 / 没在播）时返回 nil。
+    static func probe() -> ProbeResult? {
+        lock.lock()
+        if let c = cache, Date().timeIntervalSince(c.at) < 1.0 {
+            let hit = c.result
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+
+        let result = refresh()
+
+        lock.lock()
+        cache = (Date(), result)
+        lock.unlock()
+        return result
+    }
+
+    /// 把每个活跃日志里新增的内容读进来，更新各自的状态，再挑出全局最新的一条。
+    private static func refresh() -> ProbeResult? {
+        let live = recentLogs()
+
+        // 已经不活跃的日志，状态一起丢掉，免得下次重开时接着用陈旧偏移
+        for k in files.keys where !live.contains(k) { files[k] = nil }
+
+        for path in live {
+            var st = files[path] ?? FileState()
+            guard let h = FileHandle(forReadingAtPath: path) else { continue }
+            defer { try? h.close() }
+            guard let size = try? h.seekToEnd() else { continue }
+
+            // 第一次见 / 文件被轮转变小了 → 从尾部重建基线
+            if !st.seeded || size < st.offset {
+                st = FileState()
+                st.offset = size > seedBytes ? size - seedBytes : 0
+                st.seeded = true
+            }
+            guard size > st.offset else { files[path] = st; continue }
+
+            guard let text = readChunk(h, from: st.offset, to: size) else { continue }
+            // 回退一点点，容忍上一块末尾被截断的半行；重复消费是幂等的
+            st.offset = size > 200 ? size - 200 : 0
+            consume(text, into: &st)
+            files[path] = st
+        }
+
+        // 先把「还在播、且判过 HDR」的实例挑出来。
+        //
+        // 优先级高于「最近一条判定」：正片判 HDR 后，首页预览会不断打 None，
+        // 按时间取最新永远是 None。只有「该实例没停 + 最近还在输出日志」才能
+        // 说明它真的在播 —— 一旦关片，腾讯视频会给这个实例发 kStop，或者它
+        // 直接不再出日志，两种都会让它掉出这个集合。
+        let now = Date()
+        var hdrHit: (at: Date, result: ProbeResult)?
+        var liveHit: (at: Date, result: ProbeResult)?
+
+        // 按路径排序再遍历：字典无序，两个实例 lastSeen 相同（同一毫秒）时
+        // 谁先被遇到会让结论在两次运行间跳，先排一下保证稳定。
+        for (_, st) in files.sorted(by: { $0.key < $1.key }) {
+            for inst in st.instances.values {
+                // 已停止的实例不算
+                if let s = inst.stopped, let a = inst.at, s > a { continue }
+                if inst.stopped != nil, inst.at == nil { continue }
+
+                guard let seen = inst.lastSeen else { continue }
+
+                // 实例级 HDR 只在「它最近还在输出日志」时才算数。
+                // 窗口压到 8 秒：关片时腾讯视频经常不发 kStop（直接切走内容），
+                // 这时只能靠「不再出日志」来判定，窗口太长会让 HDR 一直挂着。
+                // 暂停不受影响 —— 暂停时内容标志 `isHDRVideo` 仍会周期刷新，
+                // 由下面那一层兜住。
+                if let v = inst.verdict, let at = inst.at,
+                   v == .hdr, now.timeIntervalSince(seen) < hdrWindow,
+                   hdrHit == nil || at > hdrHit!.at {
+                    hdrHit = (at, ProbeResult(verdict: v, detail: inst.detail, evidence: .appLog))
+                }
+                if liveHit == nil || seen > liveHit!.at {
+                    var v = inst.verdict ?? .unknown
+                    var detail = inst.verdict == nil ? "腾讯视频 · 正在播放" : inst.detail
+                    // `hdr type=None` 只代表「渲染成了 SDR」：显示器没开 HDR 时，
+                    // HDR 片源也会渲成 SDR。没有 `isHDRVideo` 佐证就不敢当 SDR，
+                    // 否则会「看到 None → 关 HDR → 永远读不到 HDR」自己锁死。
+                    if v == .sdr, !st.flagSeen {
+                        v = .unknown
+                        detail = "腾讯视频 · 正在播放（画质未知）"
+                    }
+                    // 实例还没打判定（刚起播那一两秒）时，用主内容标志补：
+                    // 它说的是「这一片是 HDR / 是 SDR」，比实例更早就有结论。
+                    // 不补的话这里会吐「未知」，上层走「保持 HDR」并顺手刷新
+                    // 计时，而回落靠的正是这个计时 —— 于是一直回不去。
+                    if v == .unknown, let fv = st.verdict, let fa = st.at,
+                       now.timeIntervalSince(fa) < 60 {
+                        v = fv
+                        detail = st.detail
+                    }
+                    // 主内容已经被清空（关片回首页时 `isHDRVideo` 刷成 null，
+                    // 于是 `st.at` 归 nil），此刻还在出日志的只剩首页推荐位的
+                    // 自动预览 —— 那些永远是 SDR。判「未知」会让上层一直走
+                    // 「保持 HDR」，屏幕就再也回不来了。
+                    if v == .unknown, st.flagSeen, st.at == nil {
+                        v = .sdr
+                        detail = "腾讯视频 · 已结束（仅首页预览）"
+                    }
+                    liveHit = (seen, ProbeResult(verdict: v, detail: detail, evidence: .appLog))
+                }
+            }
+        }
+
+        if let hit = hdrHit { return hit.result }
+
+        if Log.enabled {
+            let desc = files.map { k, v in
+                "\(((k as NSString).lastPathComponent).suffix(17))=\(v.offset)/\(v.instances.count)"
+            }.joined(separator: " ")
+            Log.write("  腾讯日志: live=\(live.count) 缓存=\(files.count) [\(desc)]")
+        }
+
+        // 没有实例级 HDR 判定，退一步看内容标志。
+        //
+        // 这是打破死锁的那一步：显示器没开 HDR 时，即使片源是 HDR，播放器
+        // 也只报 `hdr type=None`（它渲成了 SDR）。只有 `isHDRVideo=1` 能说明
+        // 「这片有 HDR 版本」。首页预览永远是 0，所以看到 1 就说明有 HDR 内容在播。
+        //
+        // 这里**不再要求「实例最近还在写日志」**：暂停时播放器会停止输出，
+        // 实例看着就「不动了」，但片子还开着，HDR 不该收。判断内容是否结束
+        // 交给 `isHDRVideo` 归零（关片时它会被刷成 0 / null）。
+        for (_, st) in files.sorted(by: { $0.key < $1.key }) {
+            guard let at = st.flagAt, now.timeIntervalSince(at) < flagLifetime else { continue }
+            return ProbeResult(verdict: .hdr, detail: "腾讯视频 · HDR", evidence: .appLog)
+        }
+
+        if let hit = liveHit { return hit.result }
+
+        // 没有任何实例判定 → 用 `isHDRVideo` 兜底（老逻辑）
+        var best: (at: Date, result: ProbeResult)?
+        for st in files.values {
+            guard let at = st.at, let v = st.verdict else { continue }
+            if let s = st.stopped, s > at { continue }
+            if best == nil || at > best!.at {
+                best = (at, ProbeResult(verdict: v, detail: st.detail, evidence: .appLog))
+            }
+        }
+        return best?.result
+    }
+
+    /// 从日志行里取出播放实例标识，例如 `[TVKPlayer_C1021_T10000_tpplayer27_tpcore26]`
+    /// → `tpplayer27_tpcore26`。取不到（tpdlcore / 字幕模块那些行）返回 nil。
+    private static func instanceID(_ line: String) -> String? {
+        guard let r = line.range(of: "tpplayer") else { return nil }
+        let rest = line[r.lowerBound...]
+        guard let end = rest.firstIndex(of: "]") else { return nil }
+        return String(rest[..<end])
+    }
+
+    /// 消费一段日志文本（可能是从文件中间切进去的，首行是残行 ——
+    /// 用「行首能不能解析出时间戳」自然把它筛掉）。
+    private static func consume(_ text: String, into st: inout FileState) {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = String(line)
+            guard let t = time(of: line) else { continue }
+
+            let inst = instanceID(line)
+            let isStop = line.contains("Destructor. media_type:kVideo") || line.contains("id:kStop")
+
+            // 任何带实例标识的行都算「这个实例还活着」
+            if let id = inst {
+                var s = st.instances[id] ?? InstanceState()
+                if s.lastSeen == nil || t > s.lastSeen! { s.lastSeen = t }
+                if isStop, s.stopped == nil || t > s.stopped! { s.stopped = t }
+
+                if line.contains("frame hdr info changed"),
+                   let r = line.range(of: "==> hdr type=") {
+                    let cut = line[r.upperBound...].prefix { $0 != "," }
+                    let v = cut.trimmingCharacters(in: .whitespaces)
+                    if !v.isEmpty, s.at == nil || t >= s.at! {
+                        let isSDR = (v == "None")
+                        s.verdict = isSDR ? .sdr : .hdr
+                        s.detail = isSDR ? "腾讯视频 · SDR" : "腾讯视频 · \(v)"
+                        s.at = t
+                    }
+                }
+                st.instances[id] = s
+            }
+
+            // `isHDRVideo` 约每 30 秒重刷一次，带当前主内容的 fileid；这一行
+            // 不带实例标识（是字幕渲染模块打的），只能整个文件记一条。
+            //
+            // 它有两种「归零」：`fileid=真实ID` 表示主内容换成了 SDR，
+            // `fileid=(null)` 表示主内容没了（关片回首页）。两种都必须把
+            // `isHDRVideo=1` 的记录作废 —— 否则关掉 HDR 片之后那条记录会靠
+            // 新鲜期一直成立，首页预览又把 session 撑着，屏幕就一直不回落。
+            if line.contains("isHDRVideo="),
+               let r = line.range(of: "isHDRVideo="),
+               let n = Int(line[r.upperBound...].prefix(1)) {
+                st.flagSeen = true
+                let cleared = line.contains("fileid=(null)")
+                if n == 1 {
+                    st.flagAt = t
+                    st.verdict = .hdr
+                    st.detail = "腾讯视频 · HDR"
+                    st.at = t
+                } else {
+                    st.flagAt = nil
+                    if cleared {
+                        // 主内容清空：这条片子已经结束，别拿旧结论兜底
+                        st.verdict = nil
+                        st.at = nil
+                    } else if t >= (st.at ?? .distantPast) {
+                        st.verdict = .sdr
+                        st.detail = "腾讯视频 · SDR"
+                        st.at = t
+                    }
+                }
+            }
+            // 解码器销毁 / 播放卡在停止指令上：这之后没有新的内容判定，
+            // 说明片子已经停了 —— 不能拿上一次的 HDR 一直挂着。
+            if isStop {
+                st.stopped = t
+            }
+        }
+    }
+
+    /// 日志里最近还有实例在输出？用来补「没有防休眠断言但在播」的情况。
+    ///
+    /// 腾讯视频不是每次都持断言 —— 实测播广告 / 部分内容时整段都没有
+    /// `NoDisplaySleepAssertion`，播放位置却一直在往前走。只看断言会把它
+    /// 判成「已暂停」，于是永远不切。
+    static func isLive(_ seconds: TimeInterval = 8) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        for st in files.values {
+            for inst in st.instances.values {
+                guard let seen = inst.lastSeen, now.timeIntervalSince(seen) < seconds else { continue }
+                // 已停止的实例不算
+                if let s = inst.stopped, s >= (inst.at ?? .distantPast) { continue }
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 刚刚停止播放？用来「立刻回落」—— 关掉片子不必再等满宽限期。
+    /// 只认「停止时间晚于最后一次内容判定」的那种，避免几十年前的旧记录也命中。
+    static func stoppedRecently(_ seconds: TimeInterval = 20) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        for st in files.values {
+            // 实例级：某个正在播 HDR 的实例刚停 —— 这才是真的关片
+            for inst in st.instances.values {
+                guard let s = inst.stopped, now.timeIntervalSince(s) < seconds else { continue }
+                if inst.at == nil || s > inst.at! { return true }
+            }
+            guard let s = st.stopped, now.timeIntervalSince(s) < seconds else { continue }
+            if st.at == nil || s > st.at! { return true }
+        }
+        return false
+    }
+}
+
 // MARK: - MediaRemote（系统「正在播放」）
 
 enum MediaRemote {
@@ -1520,6 +1944,7 @@ struct MediaSession {
     enum Kind {
         case player      // 专门用来放片的播放器
         case streaming   // 浏览器 / 音乐类，拿不到画质信息
+        case appStreaming // 原生流媒体客户端（腾讯视频）：有 App 内判据
     }
 
     let appName: String
@@ -1545,7 +1970,13 @@ struct MediaSession {
     /// 「凭什么这么判」的一句话说明
     var basis: String {
         let how = activity >= 2 ? "播放中" : (activity == 1 ? "前台" : "已暂停")
-        return "\(evidence.label) · \(how) · \(kind == .streaming ? "浏览器" : "播放器")"
+        let what: String
+        switch kind {
+        case .player: what = "播放器"
+        case .streaming: what = "浏览器"
+        case .appStreaming: what = "流媒体客户端"
+        }
+        return "\(evidence.label) · \(how) · \(what)"
     }
 }
 
@@ -1607,6 +2038,13 @@ enum PlaybackWatcher {
         "com.apple.Music"
     ]
 
+    /// 原生流媒体客户端：不是浏览器，拿不到网页；但播放内核会把自己的
+    /// 内容级 HDR 判定写进日志，可以读（见 TencentVideoProbe）。
+    /// 这类 App 单独归一档，避免被当成「网页视频」去跑 AppleScript。
+    static let nativeStreamingApps: [String] = [
+        "com.tencent.tenvideo"      // 腾讯视频
+    ]
+
     /// 上一轮被排除的下载器名称，只给 `why` / `sessions` 显示用
     private(set) static var ignoredApps: [String] = []
     private static let ignoredLock = NSLock()
@@ -1630,6 +2068,11 @@ enum PlaybackWatcher {
                 guard let id = app.bundleIdentifier else { return nil }
                 if localPlayers.contains(id) { return (app, .player) }
                 if includeStreaming && streamingApps.contains(id) { return (app, .streaming) }
+                // 腾讯视频这类原生流媒体：自己的播放内核会写 HDR 判定日志，
+                // 走单独一档，别让它落进下面的「任意第三方 App」里被判成播放器。
+                if nativeStreamingApps.contains(id) {
+                    return includeStreaming ? (app, .appStreaming) : nil
+                }
                 // 系统 App 太多且不会放本地视频，跳过以免每个都去查句柄
                 if id.hasPrefix("com.apple.") { return nil }
                 if id == Bundle.main.bundleIdentifier { return nil }
@@ -1644,6 +2087,14 @@ enum PlaybackWatcher {
         ignoredLock.lock()
         ignoredApps = skipped
         ignoredLock.unlock()
+
+        // 诊断：自动模式长期拿不到会话时，看这里就知道是「系统没给出运行中
+        // App」还是「候选都过滤掉了」
+        if Log.enabled {
+            let total = NSWorkspace.shared.runningApplications.count
+            let ids = candidates.map { $0.app.bundleIdentifier ?? "?" }
+            Log.write("  候选: 运行中 \(total) 个 → 候选 \(candidates.count) 个 [\(ids.joined(separator: ", "))]")
+        }
 
         guard !candidates.isEmpty else { return [] }
 
@@ -1679,7 +2130,34 @@ enum PlaybackWatcher {
             let remotePlaying = (nowPlaying?.playing ?? false) && nowPlaying?.pid == pid
             // WebKit 的「Media Playback」断言：浏览器页内视频在播而不上报系统媒体信息时靠它
             let webPlaying = item.kind == .streaming && webBundles.contains(appID)
-            let playing = hasAssert || remotePlaying || webPlaying
+            var playing = hasAssert || remotePlaying || webPlaying
+
+            // 腾讯视频：防休眠断言在**暂停和关掉片子之后都不撤**（实测挂着断言
+            // 回到首页也照样在），光看它分不出「还在放」和「已经关了」。日志里
+            // 那条内容判定才是准的 —— 停播时播放内核先打 kStop、之后没人再更新，
+            // 探针就返回 nil；正放着或暂停着时判定都还在。
+            //
+            // 所以这一类要求「断言 + 日志判定」同时成立才算在播：
+            //   · 都在   → 在播，按日志判 HDR/SDR
+            //   · 有断言、无判定（回首页翻片）→ 不算在播，HDR 该回落就回落
+            //   · 无断言、有判定（暂停）→ 走下面的暂停分支，保持不掉色
+            let tvResult: ProbeResult?
+            if item.kind == .appStreaming {
+                tvResult = TencentVideoProbe.probe()
+                if Log.enabled {
+                    Log.write("  腾讯视频: probe=\(tvResult?.detail ?? "nil") hasAssert=\(hasAssert) remote=\(remotePlaying) live=\(TencentVideoProbe.isLive()) 句柄=\(ProcFiles.openPaths(pid: pid).count)")
+                }
+                if tvResult == nil {
+                    playing = false
+                } else if !playing && TencentVideoProbe.isLive() {
+                    // 没有断言但日志一直在写、播放位置在走 —— 这是在播，
+                    // 不是「暂停」。腾讯视频播广告/部分片源时确实不持断言。
+                    playing = true
+                }
+            } else {
+                tvResult = nil
+            }
+
             // 活跃度：2 = 在播，1 = 只是前台开着，0 = 后台且没在播（多半是暂停）
             let activity = (playing ? 2 : 0) + (isFront ? 1 : 0)
 
@@ -1718,6 +2196,22 @@ enum PlaybackWatcher {
             var heldPaused = false
 
             if !playing {
+                // 腾讯视频暂停：防休眠断言被收回，但片子还挂在那儿。
+                // 它既没有窗口标题可读（没有屏幕录制权限），也没有网页可问，
+                // 所以回日志里再看一眼：只要最后一条内容判定没有落在
+                // 「停止播放」之后，就还是那一条片子 —— 按暂停处理，别掉色。
+                if item.kind == .appStreaming {
+                    guard keepPaused, let tv = tvResult else { continue }
+                    let s = MediaSession(appName: name, path: nil,
+                                         verdict: tv.verdict,
+                                         detail: tv.detail + " · 已暂停",
+                                         kind: .appStreaming, evidence: .appLog,
+                                         activity: 0, paused: true)
+                    result.append(s)
+                    if tv.verdict != .unknown { touchJudge(name) }
+                    continue
+                }
+
                 // 网页暂停：页面里的 <video> 还在，只是时间轴停住了。
                 // 回页面里问一句拿它的画质，HDR 的就别收回去。切换标签、
                 // 切到别的 App 都不算结束 —— 只看那个网页有没有被关掉。
@@ -1909,13 +2403,24 @@ enum PlaybackWatcher {
                     continue
                 }
                 var verdict = HDRVerdict.unknown
-                var detail = item.kind == .streaming ? "网页播放中 · 色彩未知" : "播放中 · 无本地片源"
+                var detail: String
+                switch item.kind {
+                case .streaming: detail = "网页播放中 · 色彩未知"
+                case .appStreaming: detail = "腾讯视频播放中 · 画质未读到"
+                case .player: detail = "播放中 · 无本地片源"
+                }
                 var evidence = Evidence.none
                 if item.kind == .streaming,
                    let web = WebProbe.probe(bundleID: app.bundleIdentifier ?? "") {
                     verdict = web.verdict
                     detail = web.detail
                     evidence = .webProbe
+                }
+                // 腾讯视频：用前面已经读到的那条内容级判定
+                if let tv = tvResult {
+                    verdict = tv.verdict
+                    detail = tv.detail
+                    evidence = .appLog
                 }
                 let s = MediaSession(appName: name, path: nil, verdict: verdict,
                                      detail: detail, kind: item.kind,

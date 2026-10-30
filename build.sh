@@ -18,8 +18,20 @@ swiftc -swift-version 5 -O \
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-echo "==> 签名（ad-hoc）"
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
+# 签名。优先用本机的自签名证书 —— 它的 designated requirement 只绑
+# 「bundle id + 证书指纹」，重编译后 cdhash 变了也仍然算同一个 App，
+# 于是「完全磁盘访问权限」这类授权不会每次编译后失效。
+# ad-hoc 签名的 requirement 直接绑 cdhash，改一行代码系统就当成新 App，
+# 授权全部重问一遍（之前反复弹「访问可移除宗卷」就是这么来的）。
+SIGN_ID="HDRSwitch Self Signed"
+SIGN_KC="$HOME/Library/Keychains/hdrswitch.keychain-db"
+if security find-certificate -c "$SIGN_ID" "$SIGN_KC" >/dev/null 2>&1; then
+    echo "==> 签名（${SIGN_ID}）"
+    codesign --force --keychain "$SIGN_KC" --sign "$SIGN_ID" "$APP"
+else
+    echo "==> 签名（ad-hoc）"
+    codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
+fi
 
 echo "==> 完成: $(pwd)/$APP"
 echo

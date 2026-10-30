@@ -43,10 +43,19 @@ for ARCH in arm64 x86_64; do
     fi
 done
 if [ "$ok_uni" = "1" ]; then
-    lipo -create -output "$UNI_BIN" "$UNI_DIR/arm64" "$UNI_DIR/x86_64" 2>/dev/null && \
-        cp "$UNI_BIN" "$APP_PATH/Contents/MacOS/${APP_NAME}" && \
-        codesign --force --sign - --timestamp=none "$APP_PATH" >/dev/null 2>&1 && \
-        echo "    已合成为通用二进制：$(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
+    lipo -create -output "$UNI_BIN" "$UNI_DIR/arm64" "$UNI_DIR/x86_64" 2>/dev/null
+    cp "$UNI_BIN" "$APP_PATH/Contents/MacOS/${APP_NAME}"
+    # 注意：lipo 换掉二进制后必须重签，且必须用和 build.sh 相同的身份。
+    # 这里若用 ad-hoc（--sign -），designated requirement 会绑到新的 cdhash 上，
+    # 用户之前授予的「完全磁盘访问权限」会被系统当成另一个 App，全部失效。
+    SIGN_ID="HDRSwitch Self Signed"
+    SIGN_KC="$HOME/Library/Keychains/hdrswitch.keychain-db"
+    if security find-certificate -c "$SIGN_ID" "$SIGN_KC" >/dev/null 2>&1; then
+        codesign --force --keychain "$SIGN_KC" --sign "$SIGN_ID" "$APP_PATH" >/dev/null 2>&1
+    else
+        codesign --force --sign - --timestamp=none "$APP_PATH" >/dev/null 2>&1
+    fi
+    echo "    已合成为通用二进制：$(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
 else
     echo "    使用本机架构：$(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
 fi
@@ -127,17 +136,21 @@ HDRSwitch ${VERSION}
   没有窗口，也没有 Dock 图标。
 
 第一次打开被系统拦住
-  这个 App 没有做 Apple 公证（ad-hoc 签名），macOS 会提示「无法验证开发者」。
+  这个 App 没有做 Apple 公证（本地自签名证书），macOS 会提示「无法验证开发者」。
   解决办法：在「应用程序」里按住 Control 点它 → 打开 → 再点一次「打开」。
   或者：系统设置 → 隐私与安全性 → 往下滚到「仍要打开」。
 
-要授权的两项
+要授权的三项
   1. 自动化（Apple 事件）—— 用来读浏览器里的实测画质，只在开启
      「网页视频按实测画质切换」时用到。第一次会弹窗，允许即可。
-  2. 共享片源识别 —— 想让它认出 Infuse 通过 SMB 播的片源时，
+  2. 完全磁盘访问权限 —— 用来读腾讯视频播放内核写的画质日志（日志在
+     它自己的沙盒容器里，别的 App 不授权一律 permission denied）。
+     菜单里有「腾讯视频识别：点击授权」，点了会打开设置页并高亮本 App，
+     勾上、重启一次即可。不给也能用，只是腾讯视频判不出画质、不自动切。
+  3. 共享片源识别 —— 想让它认出 Infuse 通过 SMB 播的片源时，
      双击「可选组件（共享识别）」里的「安装共享识别.command」，
      输一次管理员密码。不装也能用，只是共享片源只能靠播放器判断。
-     替代方案：给 HDRSwitch 开「完全磁盘访问权限」也能读到。
+     取代方案：给了第 2 项「完全磁盘访问权限」的，不装这个也能读到。
 
 卸载
   把 App 拖到废纸篓。若装过辅助工具：
@@ -174,6 +187,6 @@ echo ""
 echo "==> 完成"
 ls -lh "$DMG" | awk '{print "    " $9 "  " $5}'
 echo "    架构: $(lipo -archs "$APP_PATH/Contents/MacOS/${APP_NAME}")"
-echo "    签名: $(codesign -dv "$APP_PATH" 2>&1 | grep -m1 'Signature' || echo 'ad-hoc')"
+echo "    签名: $(codesign -dvv "$APP_PATH" 2>&1 | grep -m1 '^Authority=' | cut -d= -f2- || echo 'ad-hoc')"
 echo "    内容:"
 (cd "$STAGE" && find . -maxdepth 2 -not -path "./HDRSwitch.app/*" | sed 's|^\./|      |' | sort)

@@ -328,6 +328,7 @@ final class AutoHDR {
             // 这两种情况再等满宽限期，用户感受到的就是「回落很慢」。
             // 压到一个 tick 的量级，既立刻回落，又不至于在探测抖动的那一轮就动。
             let hardGone = WebProbe.pageGoneRecently() || WindowProbe.closedRecently()
+                || TencentVideoProbe.stoppedRecently()
             let need: TimeInterval
             if hardGone {
                 need = min(grace, 0.6)
@@ -366,6 +367,12 @@ final class AutoHDR {
             case .player:
                 if unknownAsHDR { return .on }
                 return (keepUnknownPlayer && hdrOn) ? .keep : .off
+            case .appStreaming:
+                // 原生流媒体（腾讯视频）：判据来自它自己的播放内核日志。
+                // 读不到时同样不主动开；已经开着就先保持 —— 收 HDR 只该由
+                // 「明确读到 SDR」或「播放结束」触发，不该由「这一轮没读到」触发。
+                if hdrOn { return .keep }
+                return streamingAsHDR ? .on : .off
             case .streaming:
                 // 网页视频：读不到色彩信息时不主动开 HDR（除非显式勾了
                 // 「网页视频一律按 HDR」）—— 这是「不开」的原则。
@@ -439,6 +446,9 @@ final class AutoHDR {
         case .unknown:
             if s.kind == .streaming {
                 return "自动切换：\(s.appName) · 网页视频（读不到画质，不切）"
+            }
+            if s.kind == .appStreaming {
+                return "自动切换：\(s.appName) · 流媒体（读不到画质，不切）"
             }
             return "自动切换：\(s.appName) · 片源未知（\(unknownAsHDR ? "按 HDR 处理" : "不切")）"
         }

@@ -630,6 +630,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         smbItem.isEnabled = !smbAccess
         autoOptions.addItem(smbItem)
 
+        // 腾讯视频把画质判定写在自己的沙盒容器里，读它需要「完全磁盘访问权限」。
+        // 没授权时菜单栏必须说清楚 —— 否则用户看到的就是「播了 HDR 片却毫无反应」，
+        // 而命令行（继承终端权限）又是正常的，根本没线索。
+        if NSWorkspace.shared.runningApplications.contains(where: {
+            $0.bundleIdentifier == TencentVideoProbe.bundleID
+        }) || FileManager.default.fileExists(atPath: "/Applications/QQLive.app") {
+            let tvOK = TencentVideoProbe.canRead()
+            let tvItem = NSMenuItem(
+                title: tvOK ? "腾讯视频识别：已就绪"
+                            : "腾讯视频识别：点击授权（读播放内核画质日志）",
+                action: tvOK ? nil : #selector(menuOpenFullDiskAccess),
+                keyEquivalent: "")
+            tvItem.target = self
+            tvItem.isEnabled = !tvOK
+            autoOptions.addItem(tvItem)
+        }
+
         // 读外置盘 / 网络卷上的片源会触发系统授权框，而授权跟着签名走 ——
         // 每次重新编译都要再点一遍。默认不读，靠文件名判定；需要精确时再打开。
         let extItem = NSMenuItem(
@@ -1081,6 +1098,18 @@ func runCLI(_ command: String) -> Never {
                 print("     路径=\(p)")
             }
         }
+        print("")
+
+        print("=== 腾讯视频 ===")
+        if let tv = TencentVideoProbe.probe() {
+            print("  当前内容: \(tv.detail)（\(tv.verdict.label)）· 依据 \(tv.evidence.label)")
+        } else if !TencentVideoProbe.canRead() {
+            print("  当前内容: 读不到 · 缺少「完全磁盘访问权限」")
+            print("            系统设置 → 隐私与安全性 → 完全磁盘访问权限 → 勾选 HDRSwitch")
+        } else {
+            print("  当前内容: 读不到（没在播 / 已停止播放 / 日志不可读）")
+        }
+        print("  判定来源: 播放内核日志 \(TencentVideoProbe.logDir)")
         print("")
 
         print("=== 自动模式 ===")

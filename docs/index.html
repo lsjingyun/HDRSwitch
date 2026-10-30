@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.0.7 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.0.8 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -137,12 +137,13 @@
     <li><span class="n">03</span><a href="#auto">自动切换：它凭什么判断</a></li>
     <li><span class="n">04</span><a href="#web">网页视频（B 站 / YouTube）</a></li>
     <li><span class="n">05</span><a href="#smb">Infuse 播共享里的片源</a></li>
-    <li><span class="n">06</span><a href="#hz">为什么会掉到 60Hz、黑屏多久</a></li>
-    <li><span class="n">07</span><a href="#cli">命令行</a></li>
-    <li><span class="n">08</span><a href="#debug">出问题了怎么查</a></li>
-    <li><span class="n">09</span><a href="#faq">常见问题</a></li>
-    <li><span class="n">10</span><a href="#bye">卸载 · 已知限制</a></li>
-    <li><span class="n">11</span><a href="#log">版本记录</a></li>
+    <li><span class="n">06</span><a href="#tencent">腾讯视频这类原生播放器</a></li>
+    <li><span class="n">07</span><a href="#hz">为什么会掉到 60Hz、黑屏多久</a></li>
+    <li><span class="n">08</span><a href="#cli">命令行</a></li>
+    <li><span class="n">09</span><a href="#debug">出问题了怎么查</a></li>
+    <li><span class="n">10</span><a href="#faq">常见问题</a></li>
+    <li><span class="n">11</span><a href="#bye">卸载 · 已知限制</a></li>
+    <li><span class="n">12</span><a href="#log">版本记录</a></li>
   </ol>
 </nav>
 
@@ -151,7 +152,7 @@
 
 <p>DMG 打开后只有一件事要做：把 <b>HDRSwitch</b> 拖到旁边的 <b>Applications</b> 文件夹上。</p>
 
-<p>然后第一次打开会被 macOS 拦一次——因为它没有做 Apple 公证（个人工具，签名是本地 ad-hoc 的）。</p>
+<p>然后第一次打开会被 macOS 拦一次——因为它没有做 Apple 公证（个人工具，签名是本地自签名的证书）。</p>
 
 <div class="box warn">
   <p><b>「无法验证开发者」怎么办</b>：在「应用程序」里按住 <kbd>Control</kbd> 点 HDRSwitch → 选「打开」→ 弹窗里再点一次「打开」。只需要做一次，以后正常双击。</p>
@@ -212,6 +213,11 @@
       <td class="k">暂停播放时保持 HDR（不退回 SDR）</td>
       <td><span class="tag on">开</span></td>
       <td>暂停后播放器会收回「正在播放」的电源断言，旧版因此把暂停当成播完，宽限期一到就退回 SDR。开着这条，只要片源还开着就保持 HDR，<b>退出播放器或关掉片源</b>才回落。关掉则恢复旧行为</td>
+    </tr>
+    <tr>
+      <td class="k">腾讯视频识别：点击授权</td>
+      <td class="dim">按需</td>
+      <td>要读腾讯视频播放内核写的画质日志，得先给本 App「完全磁盘访问权限」。点一下会打开设置页并高亮本 App，勾上后重启一次。详见 <a href="#tencent">第 06 节</a></td>
     </tr>
     <tr>
       <td class="k">共享片源识别：点击安装</td>
@@ -416,7 +422,33 @@
 </div>
 
 <!-- ══════════════════ 06 ══════════════════ -->
-<h2 id="hz"><span class="n">06</span>为什么会掉到 60Hz、黑屏多久</h2>
+<h2 id="tencent"><span class="n">06</span>腾讯视频这类原生播放器</h2>
+
+<p>腾讯视频 Mac 版是原生播放器（自研 TVKPlayer 内核）：进程里没有本地媒体文件句柄可读，也不是网页，前两条路都用不上。但它的播放内核会把自己对内容的判定写进日志，工具直接读这份日志。</p>
+
+<pre><code>updateSubtitleRenderMode. isHDRVideo=1 fileid=322108
+frame hdr info changed, ... ==> hdr type=HDRVivid</code></pre>
+
+<p>判定看的是 <code>isHDRVideo</code>——它说的是<b>这一片有没有 HDR 版本</b>，跟显示器当前开没开 HDR 无关。同一份日志里还有 <code>hdr type=Xxx</code>，那是<b>渲染输出</b>：SDR 模式下 macOS 也会输出 <code>HDRVivid</code>（它自己做 tone mapping），所以按它判就会自己锁死——开了 HDR 再也关不掉。它只当佐证，不当依据。</p>
+
+<div class="box warn">
+  <p><b>这条路需要「完全磁盘访问权限」</b>。日志在腾讯视频自己的沙盒容器里（<code>~/Library/Containers/com.tencent.tenvideo/…</code>），别的 App 不授权一律 <code>permission denied</code>。右键菜单里点「<b>腾讯视频识别：点击授权</b>」，会打开设置页并高亮 HDRSwitch；勾上之后退出重开一次。</p>
+  <p>没授权不算坏：<code>HDRSwitch why</code> 的「腾讯视频」一节会直接写「读不到 · 缺少完全磁盘访问权限」。</p>
+</div>
+
+<h3>两个坑，都踩过</h3>
+
+<ul>
+  <li><b>一个日志文件里有十几个播放实例。</b>首页每个推荐位各挂一个自动预览，详情页预览一个，正式播放一个，活跃时每个都刷上千行。判定全混在一起——正片判出 <code>HDRVivid</code>，十几秒后首页预览又打一条 <code>None</code>；只取「最后一条」的话正片就被预览盖掉，永远判成 SDR。所以按实例（<code>tpplayerN_tpcoreM</code>）分别记账，再看谁还活着。</li>
+  <li><b>它的防休眠断言关片之后都不撤。</b>光看断言分不出「还在放」和「已经关了」。这一类干脆不认断言，改看<b>日志活跃度</b>：某个实例 8 秒内还有输出才算在播。关片时它经常连停止事件都不发（直接切到别的内容），这条就是唯一的判据，也是关掉片子后 HDR 能在几秒内回落的原因。</li>
+</ul>
+
+<p>另外，日志开头那一批 <code>HDR Cap Query: HDRVivid ... -&gt; Supported</code> 是<b>设备能力查询</b>（这台机器支不支持 HDR），跟正在放什么内容毫无关系。拿它当判据的话，只要打开腾讯视频就会判成 HDR——所以这一行一个字都不看。</p>
+
+<p>腾讯视频的 HDR 标准是 HDR Vivid（「臻彩视听」），日志里写作 <code>HDRVivid</code>，和 HDR10 一样按 HDR 处理。这类片源要在客户端里选「臻彩视听」画质才会生效。</p>
+
+<!-- ══════════════════ 07 ══════════════════ -->
+<h2 id="hz"><span class="n">07</span>为什么会掉到 60Hz、黑屏多久</h2>
 
 <p>这不是偷懒，是 HDMI 带宽决定的。以这台 LG ULTRAGEAR+（5120×2880，HDMI 连接）实测：</p>
 
@@ -448,8 +480,8 @@
   <p><b>全屏播放时窗口可能跳到另一个桌面</b>——这是 macOS 换模式时的行为，软件管不了。想避免就在窗口模式下播。</p>
 </div>
 
-<!-- ══════════════════ 07 ══════════════════ -->
-<h2 id="cli"><span class="n">07</span>命令行</h2>
+<!-- ══════════════════ 08 ══════════════════ -->
+<h2 id="cli"><span class="n">08</span>命令行</h2>
 
 <p>适合接快捷指令、自动化、或者排查问题时用。<code>B=/Applications/HDRSwitch.app/Contents/MacOS/HDRSwitch</code>：</p>
 
@@ -475,8 +507,8 @@
   <p>想看 App 刚刚判了什么：<code>defaults read com.wangjin.hdrswitch autoLastSession</code>，里面带着完整依据。</p>
 </div>
 
-<!-- ══════════════════ 08 ══════════════════ -->
-<h2 id="debug"><span class="n">08</span>出问题了怎么查</h2>
+<!-- ══════════════════ 09 ══════════════════ -->
+<h2 id="debug"><span class="n">09</span>出问题了怎么查</h2>
 
 <p>按这个顺序，基本三步内能定位：</p>
 
@@ -504,17 +536,18 @@
 <span class="c"># 重启 App 生效</span>
 defaults write com.wangjin.hdrswitch debugLog -bool false</code></pre>
 
-<!-- ══════════════════ 09 ══════════════════ -->
-<h2 id="faq"><span class="n">09</span>常见问题</h2>
+<!-- ══════════════════ 10 ══════════════════ -->
+<h2 id="faq"><span class="n">10</span>常见问题</h2>
 
 <h3>系统设置里根本找不到 HDR 开关？</h3>
-<p>因为你现在的刷新率把带宽吃满了。切到 60Hz 再看就有了——这也是这个工具存在的理由。<a href="#hz">见第 06 节</a>。</p>
+<p>因为你现在的刷新率把带宽吃满了。切到 60Hz 再看就有了——这也是这个工具存在的理由。<a href="#hz">见第 07 节</a>。</p>
 
 <h3>播 HDR 片源没切？</h3>
 <p>依次排三件事：</p>
 <ul>
   <li>「播放 HDR 内容时自动开启」是不是被关掉了；</li>
   <li>片源来自 NAS / 网络串流？那种情况拿不到画质，默认不切；</li>
+  <li>腾讯视频这类原生客户端？要先给 HDRSwitch「完全磁盘访问权限」才读得到它的画质日志，<a href="#tencent">见第 06 节</a>；</li>
   <li>你刚才是不是手动点过开关——手动接管期间自动逻辑不插手。</li>
 </ul>
 <p>命令行的 <code>why</code> 会直接说出是哪一条。</p>
@@ -544,8 +577,8 @@ defaults write com.wangjin.hdrswitch debugLog -bool false</code></pre>
 <h3>HDR 模式下我自己改了分辨率，状态不对了？</h3>
 <p>切一次 HDR（开→关，或关→开）就会重新同步。</p>
 
-<!-- ══════════════════ 10 ══════════════════ -->
-<h2 id="bye"><span class="n">10</span>卸载 · 已知限制</h2>
+<!-- ══════════════════ 11 ══════════════════ -->
+<h2 id="bye"><span class="n">11</span>卸载 · 已知限制</h2>
 
 <h3>卸载</h3>
 <p>先从菜单退出，然后：</p>
@@ -562,11 +595,22 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
   <li>部分显示器（尤其经过转接器 / 扩展坞连接的）压根不回报 HDR 能力，那种情况没有任何软件能打开。</li>
   <li>Infuse 播<b>远程</b> NAS / 媒体服务器：拿不到画质，默认不切。要切只能打开「播放器识别不到片源时也开 HDR」，代价是 SDR 片源也会被切。</li>
   <li>网页探测依赖页面结构。B 站改版、YouTube 换播放器实现，都可能让画质读不到——读不到就不切，不会误切。</li>
+  <li>腾讯视频的画质判定依赖它播放内核的日志格式（当前 2.188 是 <code>isHDRVideo=</code>）。腾讯日后改格式或关掉日志输出，就退回「读不到画质、不切」——同样不会误切。</li>
   <li>切换必然黑一下（约 0.7 秒）并伴随一次显示模式变更，这是 macOS 的行为。</li>
 </ul>
 
-<!-- ══════════════════ 11 ══════════════════ -->
-<h2 id="log"><span class="n">11</span>版本记录</h2>
+<!-- ══════════════════ 12 ══════════════════ -->
+<h2 id="log"><span class="n">12</span>版本记录</h2>
+
+<h3>1.0.8 · 2026-10-30</h3>
+<ul>
+  <li><b>腾讯视频（Mac 客户端）能认出来了。</b>它是原生播放器，既没有本地文件句柄、也不是网页，原来两条路都用不上，播「臻彩视听」也只能靠手动切。现在直接读它播放内核写的日志：<code>isHDRVideo=1</code> 判 HDR，<code>isHDRVideo=0</code> 判 SDR，依据标为「播放器日志」。这条只认<b>内容级</b>记录——日志开头那批 <code>HDR Cap Query ... Supported</code> 是设备能力查询（这台机器支不支持 HDR），跟正在放什么无关，拿它当判据的话一开 App 就会判成 HDR。</li>
+  <li><b>同一个日志文件里有十几个播放实例，判定必须按实例分开记。</b>首页每个推荐位各挂一个自动预览、详情页预览一个、正式播放一个，活跃时每个都刷上千行。以前取「最后一条判定」，正片判出 <code>HDRVivid</code> 之后十几秒，首页预览又打一条 <code>None</code>，正片就被盖掉、永远判成 SDR。现在按 <code>tpplayerN_tpcoreM</code> 分别记账，各记各的判定和停止时间。</li>
+  <li><b>不拿 <code>hdr type</code> 当判据。</b>它描述的是<b>渲染输出</b>：没渲染成 HDR 就打 <code>None</code>。可 macOS 在 SDR 模式下照样会输出 <code>HDRVivid</code>（它自己做 tone mapping），于是这个判据会自己把自己锁死——一旦按它判，开了 HDR 就再也关不掉。现在它只当佐证，主体判据是内容标志 <code>isHDRVideo</code>。</li>
+  <li><b>修掉「关掉 HDR 片子后不回落」。</b>三层原因叠在一起：① <code>isHDRVideo=1</code> 那条记录有效期给得太长，关片后还挂着；② 关片回到首页，首页预览让会话一直存在；③ 中途出现的「未知」判定把回落计时器重置了。现在关片时日志会把标志刷成 0 / <code>fileid=(null)</code>，判定立刻作废；这类客户端也不看防休眠断言（它关片后根本不撤断言），改看<b>日志活跃度</b>——某个实例 8 秒内还有输出才算在播。实测关片后数秒内回落。</li>
+  <li><b>新增一项授权：完全磁盘访问权限。</b>腾讯视频的日志在它自己的沙盒容器里，别的 App 不授权一律 <code>permission denied</code>。菜单里加了「腾讯视频识别：点击授权」，点了直接打开设置页并高亮 HDRSwitch。<code>HDRSwitch why</code> 的「腾讯视频」一节会明说卡在哪一步——读不到就写「读不到 · 缺少完全磁盘访问权限」，不会静默失败。</li>
+  <li><b>改用自签名证书，编译后不用重新授权。</b>以前用 ad-hoc 签名，它的 designated requirement 直接绑 <code>cdhash</code>，改一行代码重编，系统就当成另一个 App，「完全磁盘访问权限」这类授权全部失效、挨个重问一遍。现在签名身份是本机自签名证书，requirement 只绑「bundle id + 证书指纹」，重编重装都还是同一个 App。</li>
+</ul>
 
 <h3>1.0.7 · 2026-10-30</h3>
 <ul>

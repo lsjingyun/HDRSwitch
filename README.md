@@ -15,13 +15,14 @@ macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片�
 - 读容器的色彩标记：mp4 走 AVFoundation，mkv 自己解析 EBML，容器里没写就继续读码流的参数集（SPS/VUI）——不靠文件名猜
 - Infuse 播**本机 SMB 共享**时，反查 `smbd` 持有的句柄，判定和本地文件一样精确
 - 网页视频（B 站 / YouTube）让浏览器跑一小段 JS 读实测画质；YouTube「SDR 下不给 HDR 选项」的死结也解了
+- 腾讯视频这类原生流媒体客户端，读它播放内核自己写的内容级 HDR 判定（`isHDRVideo=1`）
 - 切一次只黑一次屏，约 0.7 秒
 
 ## 下载
 
-**[HDRSwitch-1.0.7.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.7.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.0.8.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.8.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
 
-打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地 ad-hoc 签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
+打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地自签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
 
 ## 要求
 
@@ -126,6 +127,35 @@ Infuse 这类应用从别的机器播放时既不产生本地文件句柄，也�
 **唯一的例外是「暂停」**：IINA、VLC 一按暂停就会收回「正在播放」的电源断言，如果此时又切到别的 App，旧逻辑会把这一幕当成「播完了」——宽限期一到就退回 SDR，暂停一下画面就掉色。现在只要**片源还开着**（进程里有这个文件的句柄）就按暂停算在场，暂停多久都保持 HDR；关掉片源或退出播放器才走宽限期。为了不把编码器、转码工具误当播放器，这条只对白名单播放器、以及「刚刚确实播过这个文件」的 App 生效。菜单里可关（默认开）。
 
 另外有一类 App 必须整个排除：**下载器**。qBittorrent、Transmission、迅雷、Motrix、Folx 这类工具会整段整段时间地持有 `.mkv` 句柄——下载中、做种中——但它们从不播放。不排除的话，一下 HDR 片源屏幕就被切过去了。现在按 bundle id + 名称把它们剔出候选；认不出的客户端还有第二层网：**文件正在变大，或刚写完 4 秒以内，都不算播放**。`HDRSwitch why` 会多打一行「已忽略下载器」，方便确认它确实被拦住了。
+
+### 原生流媒体客户端（腾讯视频）
+
+腾讯视频 Mac 版是原生播放器（自研 TVKPlayer 内核），既没有本地文件句柄，也不是网页——前两条路都用不上。但它的播放内核会把自己的判定写进日志：
+
+```text
+updateSubtitleRenderMode. isHDRVideo=1 fileid=322108
+frame hdr info changed, ... ==> hdr type=HDRVivid, hdr mapping type=HardwareHDR10StaticMapping
+```
+
+SDR 内容对应 `isHDRVideo=0` / `hdr type=None`。工具读这份日志来定 HDR / SDR，依据标为「播放器日志」。
+
+这两种记录不是一回事，混着用会出错：
+
+- `isHDRVideo` 是**内容级**判据——这一片有没有 HDR 版本，跟显示器当前开没开 HDR 无关。判定以它为主；
+- `hdr type` 是**渲染输出**——没渲染成 HDR 就打 `None`。可 macOS 在 SDR 模式下照样输出 `HDRVivid`（自己做 tone mapping），于是它把自己锁死：一旦按它判，开了 HDR 就再也关不掉。所以它只当佐证。
+
+日志开头那一批 `HDR Cap Query: HDRVivid ... -> Supported` 更要当心——那是**设备能力查询**（这台机器支不支持 HDR），跟正在放什么内容毫无关系。拿它当判据的话，只要打开腾讯视频就会判成 HDR。这一行一个字都不看。
+
+还有两个坑：
+
+- **一个日志文件里有十几个播放实例**。首页每个推荐位各挂一个自动预览、详情页预览一个、正式播放一个，活跃时每个实例都刷上千行。判定混在同一个文件里——正片判出 HDRVivid，十几秒后首页预览又打一条 `None`，只取「最后一条」的话正片会被预览盖掉，永远判成 SDR。所以按实例（`tpplayerN_tpcoreM`）分别记账，最后看谁还活着；
+- 它的防休眠断言在暂停、甚至关掉片子回到首页之后都**不撤**，光看断言分不出「还在放」和「已经关了」。这一类干脆不认断言，改看**日志活跃度**：某个实例 8 秒内还有输出才算在播。关片时它经常连停止事件都不发（直接切到别的内容），这条就是唯一的判据，也是 HDR 能在几秒内回落的原因。
+
+腾讯视频的 HDR 标准是 HDR Vivid（「臻彩视听」），日志里写作 `HDRVivid`，和 HDR10 一样按 HDR 处理。
+
+**这条路需要「完全磁盘访问权限」。** 日志在腾讯视频自己的沙盒容器里（`~/Library/Containers/com.tencent.tenvideo/…`），别的 App 要读必须先拿到这一项，否则系统一律返回 `permission denied`——HDRSwitch 只会安静地判成「读不到画质」。菜单里有「腾讯视频识别：点击授权」，点了直接打开设置页并高亮 HDRSwitch，勾上后重启一次即可。没授权也不算坏：`HDRSwitch why` 的「腾讯视频」一节会写明「读不到 · 缺少完全磁盘访问权限」。
+
+`HDRSwitch why` 里有一节「腾讯视频」，直接列出当前读到的内容和日志路径，排查时不用猜。
 
 ### 浏览器 / 网页视频
 
@@ -321,6 +351,7 @@ defaults delete com.wangjin.hdrswitch
 - Infuse 播**本机共享**的文件：已支持精确判定（靠特权小工具读 `smbd` 句柄）；播**远程 NAS / 媒体服务器**的文件：拿不到画质，默认不切
 - 特权小工具装在 `/usr/local/libexec/hdrswitch-smbdump`，卸载用 `sudo rm -f` 那两条路径即可；重新编译 App 不影响它
 - 网页视频靠浏览器执行 JS 读取画质：读不到就按「未知」处理、不切。所以**浏览器里的 SDR 网页永远不会被误切**，代价是画质标签显示「自动」或页面结构大改（B 站改版）时可能读不到、也就不切
+- 腾讯视频的画质判定依赖它播放内核的日志格式（当前 2.188 版本里是 `hdr type=` / `isHDRVideo=`）：腾讯日后改了日志格式或关掉日志输出，就会退回「读不到画质、不切」——不会误切，只是不再自动切换。日志在 `~/Library/Containers/com.tencent.tenvideo/Data/Library/Logs`，`HDRSwitch why` 会打印这个路径
 - 网页探测只在**菜单栏那个 App 进程**里生效：终端里跑 `HDRSwitch sessions/why` 会因为「发送方没有自动化授权」而探测失败，这是系统的判定方式，不是故障。看它最近一次判了什么用 `defaults read com.wangjin.hdrswitch autoLastSession`
 - Infuse 走网络串流（拿不到文件句柄）时判断不了画质，默认不切 HDR；要切可在菜单打开「播放器识别不到片源时也开 HDR」
 - 排查问题：先跑 `HDRSwitch why`，一次列出显示器状态、现场识别结果、自动模式是否被手动接管、失败计数和最近日志

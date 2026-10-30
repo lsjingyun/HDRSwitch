@@ -15,13 +15,14 @@ A tiny macOS menu bar utility: **one-click HDR for your external display**. It s
 - Reads the container's colour tags: mp4 via AVFoundation, mkv with its own EBML parser, and when the container is silent it walks down into the bitstream parameter sets (SPS/VUI) — no guessing from filenames
 - When Infuse plays from **this Mac's own SMB share**, it reverse-looks-up the handles held by `smbd`, giving the same precision as a local file
 - For web video (Bilibili / YouTube) it runs a small piece of JS in the browser to read the actual playback quality; the YouTube deadlock where "SDR means no HDR option" is solved too
+- Native streaming clients such as Tencent Video: reads the content-level HDR verdict its own playback core writes (`isHDRVideo=1`)
 - Each toggle costs exactly one blackout, about 0.7 s
 
 ## Download
 
-**[HDRSwitch-1.0.7.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.7.dmg)** · 1.2 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.0.8.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.8.dmg)** · 1.2 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
 
-Open the dmg and drag `HDRSwitch.app` into Applications. It is locally ad-hoc signed and notarised by nobody, so the first launch gets blocked once: **hold Control, click it, then Open**.
+Open the dmg and drag `HDRSwitch.app` into Applications. It is signed locally with a self-signed certificate and notarised by nobody, so the first launch gets blocked once: **hold Control, click it, then Open**.
 
 ## Requirements
 
@@ -33,7 +34,7 @@ Only the Xcode command line tools are needed:
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app, double-click to run
-./package.sh    # → build/HDRSwitch-1.0.7.dmg, distributable
+./package.sh    # → build/HDRSwitch-1.0.8.dmg, distributable
 ```
 
 The complete end-user guide: **<https://lsjingyun.github.io/HDRSwitch/>** (that is [`docs/index.html`](docs/index.html) — a single file with no external dependencies, also shipped inside the DMG, ⌘P saves it as PDF).
@@ -126,6 +127,35 @@ That last point matters: **having a file open is not the same as playing it**. A
 **The one exception is "paused"**: IINA and VLC drop their "playing video" power assertion the moment you hit pause, and if you then switch to another app the old logic read that as "playback finished" — the grace period expired and the picture lost HDR mid-movie. Now a player that **still has the source file open** counts as present, no matter how long you stay paused; HDR only falls back once the file is unloaded or the player quits. To avoid mistaking encoders and transcoders for players, this only applies to whitelisted players and to apps that were genuinely playing that same file moments ago. It can be turned off in the menu (on by default).
 
 One class of app must be excluded entirely: **downloaders**. qBittorrent, Transmission, Thunder, Motrix and Folx hold `.mkv` handles for hours on end — while downloading, while seeding — but they never play anything. Without the exclusion, the moment an HDR torrent starts downloading the display jumps to HDR. They are now removed from the candidate list by bundle id plus name matching, and there is a second net for clients that aren't recognised: **a file that is growing, or was modified within the last 4 seconds, does not count as playback**. `HDRSwitch why` prints an extra "ignored downloaders" line so you can confirm the filter fired.
+
+### Native streaming clients (Tencent Video)
+
+The Mac version of Tencent Video is a native player built on its own TVKPlayer engine — no local file handles, no web page, so neither of the two paths above applies. Its playback core does, however, log its own verdicts:
+
+```text
+updateSubtitleRenderMode. isHDRVideo=1 fileid=322108
+frame hdr info changed, ... ==> hdr type=HDRVivid, hdr mapping type=HardwareHDR10StaticMapping
+```
+
+SDR content shows `isHDRVideo=0` / `hdr type=None`. The tool reads that log and reports the evidence as the player log.
+
+The two records are not the same thing, and mixing them up breaks things:
+
+- `isHDRVideo` is a **content-level** verdict — whether this title has an HDR version at all, regardless of whether the display currently has HDR on. This is the primary signal;
+- `hdr type` is **render output** — it says `None` whenever nothing is rendered in HDR. But macOS emits `HDRVivid` even in SDR mode (it does its own tone mapping), so this one latches itself on: judged by it, HDR would turn on and never turn off. It is only used as corroboration.
+
+Watch out for the block of `HDR Cap Query: HDRVivid ... -> Supported` lines near the top of the log: that is a **device capability query** (does this machine support HDR) and has nothing to do with what is playing. Judged by that line, simply opening Tencent Video would look like HDR. Those lines are ignored entirely.
+
+Two more traps:
+
+- **one log file carries a dozen playback instances.** Every recommendation tile on the home page runs its own muted preview, plus the detail-page preview and the real playback — each writing thousands of lines while active. Their verdicts share one file: the feature film reports HDRVivid, then a home-page preview writes `None` fifteen seconds later. Taking "the last verdict" would let the preview overwrite the film and it would read SDR forever. So each instance (`tpplayerN_tpcoreM`) is tracked separately, and the one still alive wins;
+- its power assertion is **never released** on pause — not even after closing the video and returning to the home page — so the assertion cannot tell "still playing" from "already closed". This class therefore ignores assertions and watches **log activity**: an instance counts as playing only if it wrote something within the last 8 seconds. On close it often doesn't even emit a stop event (it just switches to other content), so this is the only signal — and the reason HDR falls back within a few seconds.
+
+Tencent Video's HDR standard is HDR Vivid ("臻彩视听"), written `HDRVivid` in the log; it is treated as HDR just like HDR10.
+
+**This path needs Full Disk Access.** The logs sit inside Tencent Video's own sandbox container (`~/Library/Containers/com.tencent.tenvideo/…`), and any other app must hold that grant to read them — otherwise the system simply returns `permission denied` and HDRSwitch quietly decides "quality unreadable". The menu has an item for it ("腾讯视频识别：点击授权") which opens the settings pane with HDRSwitch highlighted; tick it and restart once. Not having it isn't a failure: the Tencent Video section of `HDRSwitch why` says so explicitly.
+
+`HDRSwitch why` has a Tencent Video section listing what was read and the log path, so there is nothing to guess at.
 
 ### Browsers / web video
 
@@ -321,6 +351,7 @@ defaults delete com.wangjin.hdrswitch
 - Infuse playing from the **local share**: precise detection supported (via the privileged helper reading `smbd` handles); playing from a **remote NAS / media server**: no quality information, doesn't switch by default
 - The privileged helper lives at `/usr/local/libexec/hdrswitch-smbdump`; remove it with the two `sudo rm -f` paths above. Rebuilding the app doesn't affect it
 - Web video relies on the browser executing JS to read quality: unreadable means "unknown", no switch. So **an SDR web page is never switched by mistake**, at the cost of not switching when the quality label reads "Auto" or the page structure changes a lot (a Bilibili redesign)
+- Tencent Video's verdict depends on its playback core's log format (`hdr type=` / `isHDRVideo=` in the current 2.188 build): should that format change or logging be turned off, it falls back to "quality unreadable, no switch" — never a wrong switch, just no automatic switching. The logs live in `~/Library/Containers/com.tencent.tenvideo/Data/Library/Logs`, and `HDRSwitch why` prints that path
 - Web probing only works **in the menu bar app process**: running `HDRSwitch sessions/why` in a terminal fails because "the sender has no automation grant" — that is how the system decides, not a bug. To see the last decision, use `defaults read com.wangjin.hdrswitch autoLastSession`
 - Infuse over network streaming (no file handle) can't be judged for quality and won't switch HDR by default; enable "Turn on HDR when the source can't be identified" in the menu if you want it to
 - Troubleshooting: run `HDRSwitch why` first — it lists display state, live detection results, whether automation was overridden manually, failure counts and the recent log in one go
