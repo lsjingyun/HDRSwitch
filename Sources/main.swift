@@ -587,6 +587,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepItem.state = auto.keepUnknownPlayer ? .on : .off
         autoOptions.addItem(keepItem)
 
+        let pausedItem = NSMenuItem(title: "暂停播放时保持 HDR（不退回 SDR）", action: #selector(menuToggleKeepPaused), keyEquivalent: "")
+        pausedItem.target = self
+        pausedItem.state = auto.keepPaused ? .on : .off
+        autoOptions.addItem(pausedItem)
+
         let smbAccess = SMBService.hasAccess()
         let smbItem = NSMenuItem(
             title: smbAccess ? "共享片源识别：已就绪" : "共享片源识别：点击安装（读共享里的片源）",
@@ -715,6 +720,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshUI()
     }
 
+    @objc private func menuToggleKeepPaused() {
+        AutoHDR.shared.keepPaused.toggle()
+        refreshUI()
+    }
+
     @objc private func menuToggleStreaming() {
         AutoHDR.shared.streamingAsHDR.toggle()
         refreshUI()
@@ -792,7 +802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let auto = AutoHDR.shared
         lines.append("")
-        lines.append("自动切换: \(auto.enabled ? "开" : "关") · 未知片源=\(auto.unknownAsHDR ? "按HDR" : "不切")/\(auto.keepUnknownPlayer ? "保持" : "不保持") · 网页视频=\(auto.streamingAsHDR ? "一律HDR" : "仅确认HDR时") · 宽限=\(Int(auto.grace))s")
+        lines.append("自动切换: \(auto.enabled ? "开" : "关") · 未知片源=\(auto.unknownAsHDR ? "按HDR" : "不切")/\(auto.keepUnknownPlayer ? "保持" : "不保持") · 暂停=\(auto.keepPaused ? "保持HDR" : "视为结束") · 网页视频=\(auto.streamingAsHDR ? "一律HDR" : "仅确认HDR时") · 宽限=\(Int(auto.grace))s")
         lines.append("当前识别: \(auto.session?.description ?? "无")")
         if let s = auto.session { lines.append("判定依据: \(s.detail) · \(s.basis)") }
         lines.append("最近动作: \(auto.lastAction.isEmpty ? "无" : auto.lastAction)")

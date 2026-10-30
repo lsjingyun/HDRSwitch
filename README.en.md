@@ -123,6 +123,8 @@ There is a related option, "Keep existing HDR when the source can't be identifie
 
 That last point matters: **having a file open is not the same as playing it**. After a player quits, its file handles often linger for a while, which used to be read as "still playing HDR" — so switching back to SDR failed, or an SDR video played while an old HDR handle kept the display from dropping. Now sessions are ranked by activity and whoever is genuinely playing gets the final say.
 
+**The one exception is "paused"**: IINA and VLC drop their "playing video" power assertion the moment you hit pause, and if you then switch to another app the old logic read that as "playback finished" — the grace period expired and the picture lost HDR mid-movie. Now a player that **still has the source file open** counts as present, no matter how long you stay paused; HDR only falls back once the file is unloaded or the player quits. To avoid mistaking encoders and transcoders for players, this only applies to whitelisted players and to apps that were genuinely playing that same file moments ago. It can be turned off in the menu (on by default).
+
 One class of app must be excluded entirely: **downloaders**. qBittorrent, Transmission, Thunder, Motrix and Folx hold `.mkv` handles for hours on end — while downloading, while seeding — but they never play anything. Without the exclusion, the moment an HDR torrent starts downloading the display jumps to HDR. They are now removed from the candidate list by bundle id plus name matching, and there is a second net for clients that aren't recognised: **a file that is growing, or was modified within the last 4 seconds, does not count as playback**. `HDRSwitch why` prints an extra "ignored downloaders" line so you can confirm the filter fired.
 
 ### Browsers / web video
@@ -173,6 +175,7 @@ This path needs two system grants, and missing either one fails silently (the to
 - **Turn on HDR when playing HDR content** — master switch
 - **Turn on HDR when the source can't be identified** — **off** by default. Covers Infuse network streaming, 4K 10-bit mkv with no colour tags, etc. When off, only sources that can be positively identified as HDR trigger a switch
 - **Keep existing HDR when the source can't be identified (don't turn off automatically)** — **off** by default. When off, an unreadable source is treated as SDR and drops back on schedule; when on, HDR is never switched off automatically while it is still on (for "streamed HDR sources, better to keep it" use cases)
+- **Keep HDR while paused** — **on** by default. Pausing makes the player drop its "playing video" power assertion, which the old logic took as "playback finished" — the grace period expired and HDR fell back. With this on, HDR is kept for as long as the source file stays open; it only falls back when the file is unloaded or the player quits
 - **Switch web video by measured quality** — **on** by default. That is the "go back into the page and ask" path above
 - **Switch to HDR first when YouTube hides the HDR option** — **on** by default. YouTube doesn't offer HDR while the display is SDR; if the source has HDR it switches first and rebuilds the player once (about 1 s, position preserved) so 2160p HDR becomes selectable
 - **Pick 4K HDR quality right after unlocking** — **on** by default. After unlocking it pushes quality straight to the highest HDR rendition (2160p HDR when available), instead of waiting for YouTube to climb or clicking the menu by hand
@@ -313,7 +316,7 @@ defaults delete com.wangjin.hdrswitch
 - Only verified on Apple Silicon + macOS 26/27
 - Some displays (especially behind adapters or docks) never report HDR capability at all, and no software can turn it on for them
 - In HDR mode, changing resolution or refresh rate by hand can desynchronise the state; a single HDR toggle restores it
-- Automatic mode judges by "who is really playing" (holding the anti-sleep assertion / being the now-playing app / being frontmost), so a paused-but-not-closed player keeps HDR on; it drops back only when the player quits
+- Automatic mode judges by "who is really playing" (holding the anti-sleep assertion / being the now-playing app / being frontmost / **still having the source open**), so a paused-but-not-closed player keeps HDR on; it drops back only when the player quits or unloads the file
 - Toggling HDR always involves a display mode change and therefore a brief blackout (about 0.7 s measured, see above), and in full-screen playback the window may be moved to another desktop by the system — macOS behaviour, unavoidable
 - Infuse playing from the **local share**: precise detection supported (via the privileged helper reading `smbd` handles); playing from a **remote NAS / media server**: no quality information, doesn't switch by default
 - The privileged helper lives at `/usr/local/libexec/hdrswitch-smbdump`; remove it with the two `sudo rm -f` paths above. Rebuilding the app doesn't affect it

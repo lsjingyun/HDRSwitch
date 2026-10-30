@@ -106,6 +106,14 @@ final class AutoHDR {
         set { defaults.set(newValue, forKey: "autoStreamingAsHDR"); onChange?() }
     }
 
+    /// 暂停播放时是否保持 HDR（片源仍开着就不收回）。
+    /// 默认**开**：播放器一按暂停就会收回防休眠断言，旧逻辑因此把暂停当成「播完了」，
+    /// 宽限期一到就退回 SDR，看片中途暂停一下画面就掉色。
+    var keepPaused: Bool {
+        get { defaults.object(forKey: "autoKeepPaused") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "autoKeepPaused"); onChange?() }
+    }
+
     /// 浏览器 / 流媒体（拿不到片源信息）是否参与
     var includeStreaming: Bool {
         get { defaults.object(forKey: "autoIncludeStreaming") as? Bool ?? true }

@@ -1155,7 +1155,7 @@ struct MediaSession {
 
     /// 「凭什么这么判」的一句话说明
     var basis: String {
-        let how = activity >= 2 ? "播放中" : (activity == 1 ? "前台" : "仅打开文件")
+        let how = activity >= 2 ? "播放中" : (activity == 1 ? "前台" : "已暂停")
         return "\(evidence.label) · \(how) · \(kind == .streaming ? "浏览器" : "播放器")"
     }
 }
@@ -1277,6 +1277,7 @@ enum PlaybackWatcher {
 
             // 活跃度：只有「持防休眠断言」（真的在播）、「系统正在播放」或「当前前台」才算在用。
             // 光开着文件不算 —— 否则播放器退出后残留的文件句柄会让 HDR 一直挂着不放。
+            // 唯一的例外是「暂停」，见下面那一段。
             let hasAssert = asserting.contains(pid)
             let isFront = pid == frontPid
             let remotePlaying = item.kind == .streaming
@@ -1286,10 +1287,21 @@ enum PlaybackWatcher {
                 && webBundles.contains(app.bundleIdentifier ?? "")
             let playing = hasAssert || remotePlaying || webPlaying
             let activity = (playing ? 2 : 0) + (isFront ? 1 : 0)
-            guard activity > 0 else { continue }
 
             let mediaPaths = ProcFiles.openPaths(pid: pid).filter {
                 shouldCountAsMedia($0)
+            }
+
+            // 刚确认「真的在播」的文件记一笔：后面判断暂停时，非白名单播放器靠它认
+            if playing && !mediaPaths.isEmpty { markPlaying(mediaPaths) }
+
+            // 暂停是 activity == 0 的常态：IINA / VLC 一按暂停就收回防休眠断言，
+            // 此刻若又不在前台，以前整条会话会被丢掉 → 宽限期一到就退回 SDR。
+            // 现在只要「文件还开着、确实是播放器」就按暂停留在场上。
+            if activity == 0 {
+                guard keepPaused, item.kind == .player, !mediaPaths.isEmpty,
+                      canHoldWhilePaused(id: app.bundleIdentifier ?? "", paths: mediaPaths)
+                else { continue }
             }
 
             if !mediaPaths.isEmpty {
@@ -1356,6 +1368,41 @@ enum PlaybackWatcher {
         case .hdr: return 2
         case .unknown: return 1
         case .sdr: return 0
+        }
+    }
+
+    // MARK: 暂停
+
+    /// 片源还开着、但没在播 —— 是否当作「暂停」保持 HDR（默认开）。
+    /// 关掉后回到旧行为：暂停即视为播放结束，宽限期一到就退回 SDR。
+    static var keepPaused: Bool {
+        UserDefaults.standard.object(forKey: "autoKeepPaused") as? Bool ?? true
+    }
+
+    /// 最近确认过「真的在播」的文件（路径 → 时间）。
+    /// 用来认出白名单之外的播放器：它们暂停时同样会收回断言，
+    /// 但只要它刚才确实播过这个文件，就可以放心当作暂停。
+    private static let playingLock = NSLock()
+    private static var playingPaths: [String: Date] = [:]
+
+    private static func markPlaying(_ paths: [String]) {
+        playingLock.lock()
+        defer { playingLock.unlock() }
+        let now = Date()
+        for p in paths { playingPaths[p] = now }
+        if playingPaths.count > 200 {
+            playingPaths = playingPaths.filter { now.timeIntervalSince($0.value) < 12 * 3600 }
+        }
+    }
+
+    private static func canHoldWhilePaused(id: String, paths: [String]) -> Bool {
+        if localPlayers.contains(id) { return true }
+        playingLock.lock()
+        defer { playingLock.unlock() }
+        let now = Date()
+        return paths.contains { p in
+            guard let t = playingPaths[p] else { return false }
+            return now.timeIntervalSince(t) < 12 * 3600
         }
     }
 
