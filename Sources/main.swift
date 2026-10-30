@@ -1004,6 +1004,16 @@ func runCLI(_ command: String) -> Never {
         print("有内容: \(MediaRemote.hasContent() ? "是" : "否") · 属主: \(MediaRemote.contentBundleID() ?? "未知")")
         exit(0)
 
+    case "debugjs":
+        // 内部调试：把一段 JS 发到前台标签页执行（排查网页暂停/播放用）
+        let js = CommandLine.arguments.dropFirst(2).joined(separator: " ")
+        guard !js.isEmpty else { print("用法: debugjs <javascript>"); exit(1) }
+        let r = WebProbe.debugEval(js)
+        print(r)
+        // 由 launchd（open -n）启动时看不到 stdout，顺手落一份到临时文件
+        try? r.write(toFile: "/tmp/hdrs-debug.txt", atomically: true, encoding: .utf8)
+        exit(0)
+
     case "why":
         // 排查「为什么没自动切换」：把现场信号、自动模式状态、最近日志一次列出来
         let u = UserDefaults.standard
@@ -1114,7 +1124,7 @@ func runCLI(_ command: String) -> Never {
 
 // MARK: - 入口
 
-let cliCommands: Set<String> = ["on", "off", "toggle", "status", "list", "modes", "detect", "sessions", "auto", "menu", "why", "smb", "web", "mr"]
+let cliCommands: Set<String> = ["on", "off", "toggle", "status", "list", "modes", "detect", "sessions", "auto", "menu", "why", "smb", "web", "mr", "debugjs"]
 
 if let first = CommandLine.arguments.dropFirst().first?.lowercased(), cliCommands.contains(first) {
     runCLI(first)

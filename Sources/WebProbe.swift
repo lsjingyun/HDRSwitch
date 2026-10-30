@@ -27,14 +27,26 @@ struct WebProbeResult {
     var paused = false
 }
 
+/// 一次网页探测的结论。
+///
+/// 「没在播」有两种，必须分开：页面确实没视频（用户关了标签）该回落；
+/// 根本没读到（超时 / 授权被拒）绝不能当成结束，否则屏幕会跟着探测一起抖。
+enum WebState {
+    case playing
+    case paused
+    case empty
+    case failed
+}
+
 enum WebProbe {
     static let helperQueue = DispatchQueue(label: "com.wangjin.hdrswitch.webprobe")
 
-    private static var cache: [String: (at: Date, result: WebProbeResult?)] = [:]
+    private static var cache: [String: (at: Date, state: WebState, result: WebProbeResult?)] = [:]
     private static var statusCache: (at: Date, text: String)?
     private static var lastLoggedError = ""
-    /// 权限没开这类「问了也白问」的错误，30 秒内不再重试，避免每秒去 spawn 一次 osascript
-    private static var errorBackoff: Date?
+    /// 出错后到哪个时间点之前不再重试（避免每秒 spawn 一次 osascript）。
+    /// 很短：退避期间上层看不到会话，过长就等于「探测一失败 HDR 就掉」。
+    private static var errorBackoffUntil: Date?
     /// 进程内第一次调用——可能要等系统授权框，超时放宽
     private static var firstCall = true
     /// 显示器当前是否已经 HDR（由 AutoHDR 每轮写入），页面脚本据此决定要不要重建播放器
@@ -69,6 +81,34 @@ enum WebProbe {
     private static func playingAt(_ bundleID: String) -> Date? {
         playLock.lock(); defer { playLock.unlock() }
         return lastPlayingAt[bundleID]
+    }
+
+    /// 最近一次判定时那一页的路径（如 `/video/BV1fyXzBgEsC/`）。
+    /// 暂停后切走、那个标签被系统回收时，页面里读不到 `<video>` 了，
+    /// 但路径仍在浏览器的标签列表里 —— 靠它把「还在」和「关掉了」分开。
+    private static var lastPathAt: [String: (path: String, at: Date)] = [:]
+
+    /// 连续几轮「页面上确实没有视频」。一次读到空可能只是标签正在加载/切换，
+    /// 连读两轮才敢下结论说「那个网页被关掉了」。
+    private static var emptyStreak: [String: Int] = [:]
+
+    private static func markPath(_ bundleID: String, path: String) {
+        playLock.lock()
+        emptyStreak[bundleID] = 0
+        if !path.isEmpty { lastPathAt[bundleID] = (path, Date()) }
+        playLock.unlock()
+    }
+
+    static func lastPath(bundleID: String) -> String? {
+        playLock.lock(); defer { playLock.unlock() }
+        return lastPathAt[bundleID]?.path
+    }
+
+    /// 这一路最后一次「真的在播 / 暂停在某一页」的时间。
+    /// 探测失败时上层拿它判断「最近还活着」，别一次抓空就把 HDR 收掉。
+    static func lastActivityAt(bundleID: String) -> Date? {
+        playLock.lock(); defer { playLock.unlock() }
+        return lastPathAt[bundleID]?.at
     }
 
     /// 最近一次读到的播放健康度（readyState / 缓冲 / 帧计数 / 前进量）。
@@ -246,6 +286,10 @@ enum WebProbe {
         if(!out.paused){ out.play=1; }
         out.w=v.videoWidth; out.h=v.videoHeight;
         out.host=location.hostname;
+        /* 页面路径：暂停后切走时，靠它确认「那个视频页还开着」。
+           后台标签被系统回收后读不到 <video>，但路径还在列表里 ——
+           这种情况要当成「还在看」，而不是「网页关了」。 */
+        out.url=location.pathname;
         var t='';
         var q=document.querySelector('.bpx-player-ctrl-quality-result');
         if(q && q.textContent) t+=' q='+q.textContent.trim().replace(/\\s+/g,'_');
@@ -412,6 +456,27 @@ enum WebProbe {
     })()
     """
 
+    /// 轻量预筛：只数页面里有没有 `<video>`、有没有在播。
+    ///
+    /// 完整脚本有三百多行（画质解析、断流看门狗、拉档），对每个标签页都跑一遍
+    /// 太慢 —— 开十几个标签时 AppleScript 一轮要好几秒，直接撞上 3 秒超时，
+    /// 于是「探测失败 → 退避 → 会话消失 → HDR 掉色」循环。这里先用几行代码
+    /// 把没有视频的页面快速排掉，只有真命中的页面才值得跑完整脚本。
+    private static let lite = """
+    (function(){
+      try{
+        var p=location.pathname||'/';
+        var vs=document.querySelectorAll('video');
+        if(!vs.length) return 'N|'+p;
+        for(var i=0;i<vs.length;i++){
+          var e=vs[i];
+          if(!e.paused && !e.ended && e.readyState>=2 && e.videoWidth>0) return 'P|'+p;
+        }
+        return 'S|'+p;
+      }catch(e){ return 'N|/'; }
+    })()
+    """
+
     // MARK: - AppleScript
 
     private static func script(for appName: String, safariStyle: Bool) -> String {
@@ -425,24 +490,46 @@ enum WebProbe {
         let body: String
         if safariStyle {
             // 先问「当前正在看的那一页」：开了好几个视频标签时，
-            // 要判定的显然是眼前这个，而不是最左边那个还在后台响的
+            // 要判定的显然是眼前这个，而不是最左边那个还在后台响的。
+            // 其余标签先用轻量脚本筛（`P|路径` 在播 / `S|路径` 暂停 / `N|路径` 没有视频），
+            // 命中了才跑完整脚本 —— 十几个标签逐个跑三百行 JS 必然超时，
+            // 而超时会被上层当成「页面关了」，HDR 就跟着一起抖。
+            // 一个视频都没找到时，把各标签的路径带回去：上层靠它判断那个视频页
+            // 到底是被关掉了，还是只是被系统挂起（后台标签久了会被回收）。
             body = """
             tell application "\(appName)"
                 set fb to ""
+                set pl to ""
+                set cnt to 0
                 try
                     set r0 to (do JavaScript js in current tab of front window)
+                    set cnt to cnt + 1
                     if r0 contains "\\"play\\":1" then return r0
                     if r0 contains "\\"paused\\":1" then set fb to r0
                 end try
                 set n to count of documents
                 if n = 0 then return fb
+                if n > 40 then set n to 40
                 repeat with i from 1 to n
                     try
-                        set r to (do JavaScript js in document i)
-                        if r contains "\\"play\\":1" then return r
-                        if fb is "" and r contains "\\"paused\\":1" then set fb to r
+                        set q to (do JavaScript lite in document i)
+                        set cnt to cnt + 1
+                        if q starts with "P|" then
+                            return (do JavaScript js in document i)
+                        end if
+                        if fb is "" and q starts with "S|" then
+                            set fb to (do JavaScript js in document i)
+                        end if
+                        if q starts with "N|" then
+                            if pl is "" then
+                                set pl to text 3 thru -1 of q
+                            else
+                                set pl to pl & "|" & (text 3 thru -1 of q)
+                            end if
+                        end if
                     end try
                 end repeat
+                if fb is "" then return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"n\\":" & (cnt as string) & "}"
                 return fb
             end tell
             """
@@ -450,25 +537,46 @@ enum WebProbe {
             body = """
             tell application "\(appName)"
                 set fb to ""
+                set pl to ""
+                set cnt to 0
                 try
                     set r0 to (execute (active tab of front window) javascript js)
+                    set cnt to cnt + 1
                     if r0 contains "\\"play\\":1" then return r0
                     if r0 contains "\\"paused\\":1" then set fb to r0
                 end try
                 repeat with w in windows
                     repeat with t in tabs of w
                         try
-                            set r to (execute t javascript js)
-                            if r contains "\\"play\\":1" then return r
-                            if fb is "" and r contains "\\"paused\\":1" then set fb to r
+                            set q to (execute t javascript lite)
+                            set cnt to cnt + 1
+                            if q starts with "P|" then
+                                return (execute t javascript js)
+                            end if
+                            if fb is "" and q starts with "S|" then
+                                set fb to (execute t javascript js)
+                            end if
+                            if q starts with "N|" then
+                                if pl is "" then
+                                    set pl to text 3 thru -1 of q
+                                else
+                                    set pl to pl & "|" & (text 3 thru -1 of q)
+                                end if
+                            end if
                         end try
                     end repeat
                 end repeat
+                if fb is "" then return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"n\\":" & (cnt as string) & "}"
                 return fb
             end tell
             """
         }
-        return "on run argv\nset js to item 1 of argv\n\(body)\nreturn \"\"\nend run"
+        // lite 走第二个参数；没传时退化成一个「没有视频」的空结果，
+        // 自检之类只传一个脚本的调用也不会因此报错。
+        return "on run argv\nset js to item 1 of argv\n"
+            + "set lite to \"N|\"\n"
+            + "try\nset lite to item 2 of argv\nend try\n"
+            + "\(body)\nreturn \"\"\nend run"
     }
 
     /// 浏览器 bundle id → (AppleScript 里的应用名, 是否 Safari 语法)
@@ -493,37 +601,53 @@ enum WebProbe {
 
     /// 探测某个浏览器此刻在播的网页视频画质。拿不到信息时返回 nil（= 未知，不切）
     static func probe(bundleID: String) -> WebProbeResult? {
-        guard enabled, let info = browserInfo(bundleID) else { return nil }
+        probeState(bundleID: bundleID).1
+    }
 
-        var cached: (at: Date, result: WebProbeResult?)?
+    private static func probeState(bundleID: String) -> (WebState, WebProbeResult?) {
+        // 关掉网页探测、或者这个浏览器不支持时，返回 .empty（「这路不参与」）。
+        // 不能返回 .failed —— 那会被上层当成「暂时读不到」而沿用上次判定，
+        // 等于关掉功能之后还在替浏览器续 HDR。
+        guard enabled, let info = browserInfo(bundleID) else { return (.empty, nil) }
+
+        var cached: (at: Date, state: WebState, result: WebProbeResult?)?
         var backingOff = false
         helperQueue.sync {
             if let c = cache[bundleID], Date().timeIntervalSince(c.at) < 3 { cached = c }
-            if let t = errorBackoff, Date().timeIntervalSince(t) < 30 { backingOff = true }
+            if let d = errorBackoffUntil, Date() < d { backingOff = true }
         }
-        if let c = cached { return c.result }
-        if backingOff { return nil }
+        if let c = cached { return (c.state, c.result) }
+        if backingOff { return (.failed, nil) }
 
         let started = Date()
         let (json, error) = run(script(for: info.name, safariStyle: info.safari),
                                 js: "var __hdrsHDR=\(displayHDR && unlockHiddenHDR);\n"
                                   + "var __hdrsForce=\(forceTopHDR);\n"
-                                  + "var __hdrsCapH=\(displayPixelHeight);\n" + js)
+                                  + "var __hdrsCapH=\(displayPixelHeight);\n" + js,
+                                lite: lite)
 
+        // 三种「没在播」必须分清，否则上层只能一刀切当成「播放结束」：
+        //   .empty  —— 确实读到了页面，页面里没有视频（标签关了 / 换站了）
+        //   .failed —— 根本没读到（超时、授权被拒、Safari 没响应）
+        // 前者该回落，后者绝不能回落：一次探测失败就掉色，屏幕就会跟着探测抖动。
+        var state: WebState = .failed
         var result: WebProbeResult?
         if let data = json.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let playing = (obj["play"] as? Int) == 1
             let stalled = (obj["stall"] as? Int) == 1
+            let jsErr = (obj["err"] as? String) ?? ""
             if let h = obj["health"] as? String, !h.isEmpty {
                 lastHealth = h
                 if stalled { lastStallAt = Date() }
             }
             if playing {
+                state = .playing
                 result = judge(obj)
                 if result != nil {
                     lastJudgedAt = Date()
                     markPlaying(bundleID)
+                    markPath(bundleID, path: (obj["url"] as? String) ?? "")
                 }
                 // 记下「刚刚重建过播放器」的时间点：随后几秒看不到播放会话是正常的
                 if (obj["txt"] as? String ?? "").contains("reinit=1") { lastReinitAt = Date() }
@@ -532,6 +656,8 @@ enum WebProbe {
                 // 交给上层判断「这一场还没结束」，别一暂停就把 HDR 收回去。
                 // 读不到画质也别急着否定 —— 页面还在就还有可能是 HDR，
                 // 上层会拿「上次判过的结果」接上。
+                state = .paused
+                markPath(bundleID, path: (obj["url"] as? String) ?? "")
                 if var r = judge(obj) {
                     r.paused = true
                     result = r
@@ -540,7 +666,47 @@ enum WebProbe {
                                             detail: "网页暂停 · 画质未读到",
                                             paused: true)
                 }
+            } else if !jsErr.isEmpty {
+                state = .failed
+            } else if ((obj["n"] as? Int) ?? 0) == 0 {
+                // 一个页面都没问出来（Safari 正忙、标签还在加载、脚本全被拒）。
+                // 这跟「页面里没有视频」是两回事，绝不能当成播放结束。
+                state = .failed
+            } else {
+                // 页面上确实一个视频都没有。这时还不能断言「网页关了」——
+                // 后台标签待久了会被系统回收，`<video>` 读不到，但页面还在。
+                // 脚本会把各标签的路径带回来：里面还有「刚才播的那一页」，
+                // 就当成还在看（暂停），只剩它真的不在了才算关掉。
+                let pages = ((obj["pgs"] as? String) ?? "")
+                    .split(separator: "|").map(String.init)
+                var stillOpen = false
+                playLock.lock()
+                let last = lastPathAt[bundleID]
+                playLock.unlock()
+                if !pages.isEmpty, let last, !last.path.isEmpty,
+                   pages.contains(last.path),
+                   Date().timeIntervalSince(last.at) < 6 * 3600 {
+                    stillOpen = true
+                }
+                if stillOpen {
+                    state = .paused
+                    result = WebProbeResult(verdict: .unknown,
+                                            detail: "网页还开着 · 播放器暂时读不到",
+                                            paused: true)
+                } else {
+                    // 连读两轮都没视频，才认作「那个网页关了」。
+                    // 只读一轮就要么是标签还在加载，要么是脚本这会儿正忙 —
+                    // 一次误判的代价是屏幕掉色，多等一轮几乎没成本。
+                    playLock.lock()
+                    let streak = (emptyStreak[bundleID] ?? 0) + 1
+                    emptyStreak[bundleID] = streak
+                    playLock.unlock()
+                    state = streak >= 2 ? .empty : .failed
+                }
             }
+        } else if error.isEmpty {
+            // 脚本跑通了但输出是空串：一个页面都没问出来，不算「关掉了」
+            state = .failed
         }
 
         if !error.isEmpty {
@@ -552,14 +718,30 @@ enum WebProbe {
         }
 
         helperQueue.sync {
-            cache[bundleID] = (Date(), result)
+            cache[bundleID] = (Date(), state, result)
             statusCache = (Date(), error.isEmpty ? "可用" : error)
-            errorBackoff = error.isEmpty ? nil : Date()
+            // 退避只用来挡住「每 0.8 秒重试一次、每次都卡满超时」这种忙等。
+            // 以前一律退 30 秒 —— 那 30 秒里探测全哑，上层看不到会话，
+            // HDR 就跟着掉了再亮。现在按错误类型分开，且都很短。
+            if error.isEmpty {
+                errorBackoffUntil = nil
+            } else if error.contains("超时") {
+                // 超时说明这一轮确实慢了，但下一轮也许就好了：只歇 3 秒
+                errorBackoffUntil = Date().addingTimeInterval(3)
+            } else {
+                // 授权被拒这类：短歇 8 秒，别像以前那样哑半分钟
+                errorBackoffUntil = Date().addingTimeInterval(8)
+            }
             if Date().timeIntervalSince(started) > 1.5 {
                 Log.write("网页探测耗时较长（\(String(format: "%.1f", Date().timeIntervalSince(started))) 秒）", force: true)
             }
         }
-        return result
+        return (state, result)
+    }
+
+    /// 探测结论。调用方靠它区分「页面没了」和「这次没读到」。
+    static func outcome(bundleID: String) -> (WebState, WebProbeResult?) {
+        probeState(bundleID: bundleID)
     }
 
     /// 网页视频暂停时还能不能算「这一场还在」。
@@ -569,15 +751,27 @@ enum WebProbe {
     /// 只要你没把那个网页关掉，HDR 就一直留着（用户明确要这个行为）。
     static func pausedProbe(bundleID: String) -> WebProbeResult? {
         guard enabled else { return nil }
-        guard let r = probe(bundleID: bundleID), r.paused else { return nil }
+        let (state, r) = probeState(bundleID: bundleID)
+        guard state == .paused, let r else { return nil }
         guard let t = playingAt(bundleID),
               Date().timeIntervalSince(t) < 6 * 3600 else { return nil }
         return r
     }
 
+    /// 内部调试用：把一段 JS 发到前台标签页执行。
+    /// 只在排查「网页暂停后为什么掉色」时用，不在菜单里暴露。
+    static func debugEval(_ js: String) -> String {
+        guard let info = browserInfo("com.apple.Safari") else { return "不支持 Safari" }
+        let script = "on run argv\n"
+            + "tell application \"\(info.name)\" to do JavaScript (item 1 of argv) "
+            + "in current tab of front window\n"
+            + "end run"
+        let (out, err) = run(script, js: js)
+        return err.isEmpty ? out : "错误: \(err)"
+    }
+
     /// 状态文案（菜单 / why 用）
-    static func statusText() -> String {
-        var cached: (at: Date, text: String)?
+    static func statusText() -> String {        var cached: (at: Date, text: String)?
         helperQueue.sync { cached = statusCache }
         if let c = cached, Date().timeIntervalSince(c.at) < 120 { return c.text }
         return "尚未使用（播网页视频时才会探测）"
@@ -700,10 +894,12 @@ enum WebProbe {
     // MARK: - 执行
 
     /// 返回 (stdout, 错误说明)。错误说明为空表示跑通了。js 为 nil 时不传脚本参数
-    private static func run(_ script: String, js: String?) -> (String, String) {
+    private static func run(_ script: String, js: String?, lite: String? = nil) -> (String, String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        if let js = js {
+        if let js = js, let lite = lite {
+            p.arguments = ["-e", script, "--", js, lite]
+        } else if let js = js {
             p.arguments = ["-e", script, "--", js]
         } else {
             p.arguments = ["-e", script]
@@ -714,9 +910,10 @@ enum WebProbe {
 
         do { try p.run() } catch { return ("", "无法启动 osascript：\(error.localizedDescription)") }
 
-        // 卡住的保护：正常 3 秒；但首次调用可能正在弹「HDRSwitch 想要控制 Safari」的系统框，
-        // 那个框要等用户点，给足时间，否则会被我们自己杀掉。
-        let limit: TimeInterval = firstCall ? 25 : 3
+        // 卡住的保护：正常 6 秒（标签页多时逐个执行 JS 会慢，3 秒太紧，
+        // 一超时就被判成「没在播」，屏幕跟着抖）。首次调用可能在等系统授权框，
+        // 那个框要用户点，给足时间，否则会被我们自己杀掉。
+        let limit: TimeInterval = firstCall ? 25 : 6
         firstCall = false
         let deadline = Date().addingTimeInterval(limit)
         var timedOut = false
@@ -733,12 +930,12 @@ enum WebProbe {
         var err = (String(data: errData, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if timedOut { return (out, "浏览器响应超时（3 秒）") }
+        if timedOut { return (out, "浏览器响应超时（\(Int(limit)) 秒）") }
         if err.contains("-1743") {
             return (out, "未允许控制浏览器（系统设置 → 隐私与安全性 → 自动化 → 勾选 HDRSwitch）")
         }
         if err.contains("-10004") || err.contains("权限违例") {
-            return (out, "Safari 未开启：设置 → 高级 → 显示网页开发者功能，再到「开发者」标签勾「允许Apple事件中的JavaScript」")
+            return (out, "系统拒绝了自动化请求（隐私与安全性 → 自动化 → 勾选 HDRSwitch 控制浏览器）")
         }
         if !err.isEmpty { err = err.split(separator: "\n").last.map(String.init) ?? err }
         return (out, err)

@@ -317,6 +317,15 @@ final class AutoHDR {
             // 刚由我们重建过播放器：那几秒页面里没有 <video> 在播，别当成「播放结束」
             return WebProbe.reinitGraceActive ? .keep : .off
         }
+        // 暂停 + 画质未知 + HDR 已开 → 保持。
+        //
+        // 暂停时画质常常读不到：网页把清晰度控件收起来了，本地播放器也放掉了解码器。
+        // 判定于是变成「未知」，而未知默认按 SDR 处理 —— 于是暂停一下、切个页面，
+        // 屏幕就掉回 SDR 再没亮起来。用户明确要求「暂停期间保持」，而这里
+        // HDR 本来就是我们自己开的，暂停也不是播放结束：宁可多亮一会儿。
+        // 注意只在「未知」时这样处理：明确读到 SDR 片源（比如暂停在一条 1080p 上）
+        // 仍然按 SDR 收掉。
+        if s.paused && s.verdict == .unknown && hdrOn { return .keep }
         switch s.verdict {
         case .hdr:
             return .on
@@ -328,13 +337,16 @@ final class AutoHDR {
                 if unknownAsHDR { return .on }
                 return (keepUnknownPlayer && hdrOn) ? .keep : .off
             case .streaming:
-                // 网页视频：读不到色彩信息，默认一律当作 SDR 处理 —— 只有显式
-                // 勾了「网页视频一律按 HDR」才切换，且不会替浏览器把 HDR 续命。
-                // 两个例外：播放器刚被我们重建（加载慢），或者刚刚还读得好好的
-                // （换集/切歌那一下抓空）—— 都保持现状，别一抖就收 HDR
-                if WebProbe.reinitGraceActive || WebProbe.recentlyJudged(60) {
-                    return hdrOn ? .keep : .off
-                }
+                // 网页视频：读不到色彩信息时不主动开 HDR（除非显式勾了
+                // 「网页视频一律按 HDR」）—— 这是「不开」的原则。
+                //
+                // 但**已经开着的时候不要收**。收 HDR 只有两个正当理由：
+                //   ① 明确读到这条视频是 SDR（上面的 .sdr 分支）；
+                //   ② 播放结束（会话消失，走最前面的 guard）。
+                // 「读不到」不是理由：B 站暂停会把清晰度控件收起来，切标签、
+                // 播放器正忙、脚本偶尔超时，都会让这一轮抓空。抓空就掉色，
+                // 用户看到的就是屏幕一会儿掉一会儿亮 —— 这比多亮一会儿糟糕得多。
+                if hdrOn { return .keep }
                 return streamingAsHDR ? .on : .off
             }
         }

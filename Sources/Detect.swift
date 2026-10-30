@@ -1386,6 +1386,11 @@ struct MediaSession {
     let evidence: Evidence
     /// 活跃度：2 = 持有防休眠断言（真正在播），1 = 当前前台，0 = 只是开着文件
     let activity: Int
+    /// 这一条是「暂停」而不是「在播」。
+    /// 暂停时画质经常读不到（控件被收起、播放器释放了解码器），判定会变成
+    /// 「未知」；而「未知」默认按 SDR 处理 —— HDR 就被收掉了。有了这个标记，
+    /// 上层可以在「暂停 + 未知」时保持现状，而不是掉色。
+    var paused: Bool = false
 
     var description: String {
         let file = path.map { ($0 as NSString).lastPathComponent } ?? "网络/无本地片源"
@@ -1571,22 +1576,68 @@ enum PlaybackWatcher {
                 // 网页暂停：页面里的 <video> 还在，只是时间轴停住了。
                 // 回页面里问一句拿它的画质，HDR 的就别收回去。切换标签、
                 // 切到别的 App 都不算结束 —— 只看那个网页有没有被关掉。
-                if item.kind == .streaming, keepPaused,
-                   let web = WebProbe.pausedProbe(bundleID: appID) {
-                    var verdict = web.verdict
-                    var detail = web.detail
-                    // 暂停后控件可能被收起来，画质读不到 —— 页面还在，
-                    // 就沿用刚才判过的结果，别因为「读不到」而掉色。
-                    if verdict == .unknown, let last = lastJudge(name) {
-                        verdict = last.verdict
-                        detail = last.detail + " · 页面还开着"
+                if item.kind == .streaming {
+                    let (state, web) = WebProbe.outcome(bundleID: appID)
+                    // 页面明确在播，只是这一轮没抓到系统的「媒体播放」断言
+                    // （切到后台、断言还没立起来、或者刚重建过播放器）。
+                    // 这种情况当然不能当成播放结束。
+                    if let web, state == .playing {
+                        let s = MediaSession(appName: name, path: nil,
+                                             verdict: web.verdict,
+                                             detail: web.detail,
+                                             kind: .streaming, evidence: .webProbe,
+                                             activity: 2 + (isFront ? 1 : 0))
+                        result.append(s)
+                        if web.verdict != .unknown { noteJudge(s) }
+                        continue
                     }
-                    result.append(MediaSession(appName: name, path: nil,
-                                               verdict: verdict,
-                                               detail: detail + " · 已暂停",
-                                               kind: .streaming, evidence: .webProbe,
-                                               activity: 0))
-                    continue
+                    if keepPaused, let web, state == .paused {
+                        var verdict = web.verdict
+                        var detail = web.detail
+                        // 暂停后控件可能被收起来，画质读不到 —— 页面还在，
+                        // 就沿用刚才判过的结果，别因为「读不到」而掉色。
+                        if verdict == .unknown, let last = lastJudge(name) {
+                            verdict = last.verdict
+                            detail = last.detail + " · 页面还开着"
+                        }
+                        result.append(MediaSession(appName: name, path: nil,
+                                                   verdict: verdict,
+                                                   detail: detail + " · 已暂停",
+                                                   kind: .streaming, evidence: .webProbe,
+                                                   activity: 0, paused: true))
+                        continue
+                    }
+                    // 探测这次没跑通（超时 / 授权被拒 / 浏览器正忙）。
+                    // 以前一律当成「页面关了」，于是探测一抖屏幕就掉色 ——
+                    // 用户看到的就是「暂停后切个页面 HDR 就没了」。
+                    // 没读到 ≠ 关掉了：短时间内沿用上次判定，别把会话丢掉。
+                    if keepPaused, state == .failed {
+                        if let last = lastJudge(name),
+                           Date().timeIntervalSince(last.at) < webBlindGrace {
+                            result.append(MediaSession(appName: name, path: nil,
+                                                       verdict: last.verdict,
+                                                       detail: last.detail + " · 已暂停（探测暂不可用）",
+                                                       kind: .streaming, evidence: .webProbe,
+                                                       activity: 0, paused: true))
+                            continue
+                        }
+                        // 连历史判定都没有（比如 App 刚重启），但这一路不久前确实
+                        // 还有页面在，而且屏幕现在就是 HDR —— 那多半是这一路自己
+                        // 开的。探测抓空不该让它掉色，先按「未知 + 暂停」交上去，
+                        // 上层会保持现状；超过宽容期还没有任何证据才认输。
+                        if WebProbe.displayHDR,
+                           let at = WebProbe.lastActivityAt(bundleID: appID),
+                           Date().timeIntervalSince(at) < webBlindGrace {
+                            result.append(MediaSession(appName: name, path: nil,
+                                                       verdict: .unknown,
+                                                       detail: "网页探测暂不可用 · 保持现状",
+                                                       kind: .streaming, evidence: .webProbe,
+                                                       activity: 0, paused: true))
+                            continue
+                        }
+                    }
+                    // state == .empty：确实读到了页面，里面已经没有视频 ——
+                    // 那个网页被关掉了，这才该回落。
                 }
 
                 // 本地播放器暂停：断言被收回、焦点也可能不在它身上。
@@ -1618,7 +1669,7 @@ enum PlaybackWatcher {
                                                detail: last.detail + " · 已暂停"
                                                    + (ui == false ? " · 界面还在" : " · 界面未知"),
                                                kind: item.kind, evidence: last.evidence,
-                                               activity: 0))
+                                               activity: 0, paused: true))
                     continue
                 }
                 // 句柄还对得上 → 是暂停，继续往下判定（activity = 0，详情会标「已暂停」）
@@ -1634,7 +1685,8 @@ enum PlaybackWatcher {
                     if activity == 0 { detail += heldPaused ? " · 已暂停（片源句柄仍在）" : " · 已暂停" }
                     let s = MediaSession(appName: name, path: path, verdict: probe.verdict,
                                          detail: detail, kind: item.kind,
-                                         evidence: probe.evidence, activity: activity)
+                                         evidence: probe.evidence, activity: activity,
+                                         paused: !playing)
                     if best == nil || rank(s.verdict) > rank(best!.verdict) { best = s }
                 }
                 if let best = best {
@@ -1655,7 +1707,8 @@ enum PlaybackWatcher {
                     if activity == 0 { detail += heldPaused ? " · 已暂停（片源句柄仍在）" : " · 已暂停" }
                     let s = MediaSession(appName: name, path: path, verdict: probe.verdict,
                                          detail: detail, kind: item.kind,
-                                         evidence: probe.evidence, activity: activity)
+                                         evidence: probe.evidence, activity: activity,
+                                         paused: !playing)
                     if best == nil || rank(s.verdict) > rank(best!.verdict) { best = s }
                 }
                 if let best = best {
@@ -1731,6 +1784,14 @@ enum PlaybackWatcher {
     /// 还要挂很久（用户之前抱怨「非得退出整个 App 才回落」）。8 分钟是个折中 ——
     /// 授权屏幕录制后这条基本用不上了，界面一变就立刻回落。
     private static let pausedSoftAge: TimeInterval = 8 * 60
+
+    /// 网页探测「暂时读不到」时还沿用上次判定多久。
+    ///
+    /// 读不到不等于页面关了：Safari 正忙、标签页太多导致脚本超时、自动化授权
+    /// 被系统重新询问，都会让这一轮拿不到结果。以前一律当成「播放结束」，
+    /// 于是探测一抖屏幕就掉色 —— 用户看到的就是「暂停后切个页面 HDR 就没了」。
+    /// 明确读到「页面里没有视频」（.empty）才是真的关了，那时立刻回落。
+    private static let webBlindGrace: TimeInterval = 10 * 60
 
     /// 每个 App 最近一次判出的结果（暂停且读不到片源时沿用）。
     private static let judgeLock = NSLock()
