@@ -415,41 +415,56 @@ enum WebProbe {
     // MARK: - AppleScript
 
     private static func script(for appName: String, safariStyle: Bool) -> String {
+        // 两轮扫描：
+        //   1. 先找「正在播」的那一页 —— 有在播的当然以它为准；
+        //   2. 没有在播的，就找「暂停着但还开着」的那一页。
+        // 第二条是关键：用户暂停后去看别的标签，那个页面还在后台开着，
+        // 以前脚本只认 play:1，切走之后这里就抓空，上层判成「播放结束」，
+        // 屏幕立刻掉回 SDR。现在把暂停页的结果也带回来，只要它还没被关掉，
+        // HDR 就一直挂着。
         let body: String
         if safariStyle {
             // 先问「当前正在看的那一页」：开了好几个视频标签时，
             // 要判定的显然是眼前这个，而不是最左边那个还在后台响的
             body = """
             tell application "\(appName)"
+                set fb to ""
                 try
                     set r0 to (do JavaScript js in current tab of front window)
                     if r0 contains "\\"play\\":1" then return r0
+                    if r0 contains "\\"paused\\":1" then set fb to r0
                 end try
                 set n to count of documents
-                if n = 0 then return ""
+                if n = 0 then return fb
                 repeat with i from 1 to n
                     try
                         set r to (do JavaScript js in document i)
                         if r contains "\\"play\\":1" then return r
+                        if fb is "" and r contains "\\"paused\\":1" then set fb to r
                     end try
                 end repeat
+                return fb
             end tell
             """
         } else {
             body = """
             tell application "\(appName)"
+                set fb to ""
                 try
                     set r0 to (execute (active tab of front window) javascript js)
                     if r0 contains "\\"play\\":1" then return r0
+                    if r0 contains "\\"paused\\":1" then set fb to r0
                 end try
                 repeat with w in windows
                     repeat with t in tabs of w
                         try
                             set r to (execute t javascript js)
                             if r contains "\\"play\\":1" then return r
+                            if fb is "" and r contains "\\"paused\\":1" then set fb to r
                         end try
                     end repeat
                 end repeat
+                return fb
             end tell
             """
         }
@@ -512,11 +527,19 @@ enum WebProbe {
                 }
                 // 记下「刚刚重建过播放器」的时间点：随后几秒看不到播放会话是正常的
                 if (obj["txt"] as? String ?? "").contains("reinit=1") { lastReinitAt = Date() }
-            } else if (obj["paused"] as? Int) == 1, var r = judge(obj) {
+            } else if (obj["paused"] as? Int) == 1 {
                 // 暂停：画面停在那一帧上，画质（B 站画质码 / 控件标签）还留着。
                 // 交给上层判断「这一场还没结束」，别一暂停就把 HDR 收回去。
-                r.paused = true
-                result = r
+                // 读不到画质也别急着否定 —— 页面还在就还有可能是 HDR，
+                // 上层会拿「上次判过的结果」接上。
+                if var r = judge(obj) {
+                    r.paused = true
+                    result = r
+                } else {
+                    result = WebProbeResult(verdict: .unknown,
+                                            detail: "网页暂停 · 画质未读到",
+                                            paused: true)
+                }
             }
         }
 
@@ -541,14 +564,14 @@ enum WebProbe {
 
     /// 网页视频暂停时还能不能算「这一场还在」。
     ///
-    /// 判据：页面里还留着一个停住的 `<video>`（画质标签也还在），并且这个浏览器
-    /// 半小时内确实播过 —— 免得一个早就停在那儿、人已经去干别的标签页把 HDR
-    /// 一直占着。
+    /// 判据：那个浏览器里还开着这一页（页面里的 `<video>` 还停在那一帧），
+    /// 并且它今天确实播过。切换标签、切到别的 App、最小化浏览器都不影响 ——
+    /// 只要你没把那个网页关掉，HDR 就一直留着（用户明确要这个行为）。
     static func pausedProbe(bundleID: String) -> WebProbeResult? {
         guard enabled else { return nil }
         guard let r = probe(bundleID: bundleID), r.paused else { return nil }
         guard let t = playingAt(bundleID),
-              Date().timeIntervalSince(t) < 30 * 60 else { return nil }
+              Date().timeIntervalSince(t) < 6 * 3600 else { return nil }
         return r
     }
 

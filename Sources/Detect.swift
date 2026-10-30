@@ -1182,12 +1182,190 @@ enum MediaRemote {
         clients().contains { $0.bundleID == bundleID }
     }
 
+    // MARK: 正在播放的「内容」
+    //
+    // clients() 那份注册在播放器「停止播放、回到媒体库」之后常常还挂着，几十分钟
+    // 都不撤 —— 光看它能判断「这个 App 碰过媒体」，判断不了「这条片子还在不在」。
+    // 真正的分界在 Now Playing Info：暂停时它还在（控制中心仍显示片名和进度），
+    // 停止播放 / 关掉片子就会被清空。所以「暂停」要两条都满足。
+
+    private typealias InfoFn = @convention(c) (DispatchQueue,
+        @escaping @convention(block) (CFDictionary?) -> Void) -> Void
+    private static let infoFn: InfoFn? = {
+        guard let h = handle, let p = dlsym(h, "MRMediaRemoteGetNowPlayingInfo") else { return nil }
+        return unsafeBitCast(p, to: InfoFn.self)
+    }()
+
+    private static var cachedInfo: (value: [String: Any], at: Date)?
+
+    /// 系统当前「正在播放」的媒体信息，没有内容时返回空表
+    static func nowPlayingInfo() -> [String: Any] {
+        if let c = cachedInfo, Date().timeIntervalSince(c.at) < 2 { return c.value }
+        guard let f = infoFn else { return [:] }
+        var out: CFDictionary?
+        let sem = DispatchSemaphore(value: 0)
+        f(DispatchQueue.global(qos: .utility)) { v in out = v; sem.signal() }
+        _ = sem.wait(timeout: .now() + 0.4)
+        let dict = (out as? [String: Any]) ?? [:]
+        cachedInfo = (dict, Date())
+        return dict
+    }
+
+    /// 系统里是否还挂着一条具体的媒体（暂停也算挂着，停止播放就没了）
+    static func hasContent() -> Bool {
+        let info = nowPlayingInfo()
+        if info.isEmpty { return false }
+        // 有标题 / 时长 / 播放速率任一，都说明这条媒体真的还挂着
+        let keys = ["kMRMediaRemoteNowPlayingInfoTitle",
+                    "kMRMediaRemoteNowPlayingInfoDuration",
+                    "kMRMediaRemoteNowPlayingInfoPlaybackRate",
+                    "kMRMediaRemoteNowPlayingInfoElapsedTime"]
+        return keys.contains { info[$0] != nil }
+    }
+
+    /// 这条媒体属于哪个 App（读不到就返回 nil）
+    static func contentBundleID() -> String? {
+        nowPlayingInfo()["kMRMediaRemoteNowPlayingInfoClientBundleIdentifier"] as? String
+    }
+
     /// 播放器启动 / 退出时清缓存：否则新启动的 App 会读到上一个进程留下的判断，
     /// 表现就是「刚打开播放器，屏幕就跳 HDR」。
     static func flushCaches() {
         cachedPlaying = nil
         cachedPid = nil
         cachedClients = nil
+        cachedInfo = nil
+    }
+}
+
+// MARK: - 播放器窗口
+//
+// 「暂停」和「停止播放」在系统信号里几乎长得一样：都不持防休眠断言、都不再读
+// 片源、控制中心的注册也可能两种都留着。真正分得开的是界面 —— 暂停时播放界面
+// 还停在那一帧（窗口标题还是片名），停止播放、退回媒体库就把这条片子的界面换
+// 掉了。所以播放中记一份「窗口标题基线」，之后拿现状去比：换了就是关片了。
+//
+// 读窗口标题需要「屏幕录制」权限，没有时读到的是空标题 —— 这种情况返回 nil，
+// 调用方退回按时间兜底，不会因此误判。
+enum WindowProbe {
+    private static func norm(_ s: String) -> String {
+        // 去掉数字与空白：比较的是「界面身份」，不是播放进度
+        String(s.lowercased().filter { !$0.isNumber && !$0.isWhitespace })
+    }
+
+    /// 读窗口标题要「屏幕录制」权限。没授权时这个调用会卡住等系统回应，
+    /// 所以启动时先在后台试一次：拿得到就一路用下去，拿不到就永久退回按时间兜底，
+    /// 绝不让它拖住检测线程。
+    private enum Availability { case unknown, ok, unavailable }
+    private static var availability: Availability = .unknown
+    private static let probeQueue = DispatchQueue(label: "com.wangjin.hdrswitch.winprobe",
+                                                  qos: .utility)
+
+    static var titlesAvailable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return availability == .ok
+    }
+
+    static func warmUp() {
+        lock.lock(); let cur = availability; lock.unlock()
+        guard cur == .unknown else { return }
+        let sem = DispatchSemaphore(value: 0)
+        var got = -1
+        probeQueue.async {
+            got = rawTitles().count
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + 1.0) == .timedOut {
+            lock.lock(); availability = .unavailable; lock.unlock()
+            Log.write("播放界面识别=不可用（系统未允许读取窗口标题）", force: true)
+            return
+        }
+        lock.lock(); availability = got > 0 ? .ok : .unavailable; lock.unlock()
+        Log.write(got > 0
+                  ? "播放界面识别=可用（\(got) 个窗口有标题）"
+                  : "播放界面识别=不可用（读不到窗口标题）", force: true)
+    }
+
+    /// 用户刚在系统设置里授权后调用：重新试一次
+    static func resetAvailability() {
+        lock.lock(); availability = .unknown; lock.unlock()
+        warmUp()
+    }
+
+    /// 所有进程的正常层窗口标题
+    private static func rawTitles() -> [String] {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        var out: [String] = []
+        for w in list {
+            guard (w[kCGWindowLayer as String] as? Int) == 0,
+                  (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05
+            else { continue }
+            let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            guard (b["Height"] as? Double ?? 0) >= 120 else { continue }
+            let t = (w[kCGWindowName as String] as? String) ?? ""
+            if !t.isEmpty { out.append(t) }
+        }
+        return out
+    }
+
+    /// 该进程所有正常层窗口的标题（原样，可能为空串）
+    private static func windowTitles(pid: Int32) -> [String] {
+        guard titlesAvailable else { return [] }
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        var out: [String] = []
+        for w in list {
+            guard let p = w[kCGWindowOwnerPID as String] as? Int32, p == pid,
+                  (w[kCGWindowLayer as String] as? Int) == 0,
+                  (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05
+            else { continue }
+            let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            guard (b["Height"] as? Double ?? 0) >= 120 else { continue }
+            out.append((w[kCGWindowName as String] as? String) ?? "")
+        }
+        return out
+    }
+
+    /// 该进程的正常层窗口标题（归一化、去空、去重）
+    static func titles(pid: Int32) -> Set<String> {
+        Set(windowTitles(pid: pid).map(norm).filter { !$0.isEmpty })
+    }
+
+    private static let lock = NSLock()
+    private static var baseline: [String: Set<String>] = [:]
+
+    /// 播放中记一份界面基线
+    static func remember(pid: Int32, id: String) {
+        let t = titles(pid: pid)
+        guard !t.isEmpty else { return }
+        lock.lock()
+        baseline[id] = t
+        lock.unlock()
+    }
+
+    /// 播放界面是否已经换掉。
+    /// - true  换掉了 / 窗口全关了 → 片子关了（停止播放、退回媒体库）
+    /// - false 还是那个界面 → 只是暂停
+    /// - nil   读不到标题（没权限），交给调用方按时间兜底
+    static func interfaceChanged(pid: Int32, id: String) -> Bool? {
+        lock.lock()
+        let base = baseline[id]
+        lock.unlock()
+        guard let base, !base.isEmpty else { return nil }
+        let raw = windowTitles(pid: pid)
+        if raw.isEmpty { return true }          // 播放窗口都没了 → 片子关了
+        let now = Set(raw.map(norm).filter { !$0.isEmpty })
+        guard !now.isEmpty else { return nil }  // 有窗口但读不到标题 → 没法判断
+        return now.isDisjoint(with: base)
+    }
+
+    static func forget(id: String) {
+        lock.lock()
+        baseline[id] = nil
+        lock.unlock()
     }
 }
 
@@ -1381,6 +1559,9 @@ enum PlaybackWatcher {
             // 刚确认「真的在播」的片源记一笔：暂停时靠它确认「还是那个片子」
             if playing {
                 markLive(appID, paths: mediaPaths + smbPaths)
+                // 顺带记下播放界面：之后界面一换（退回媒体库 / 关掉片子）
+                // 就是「停止播放」而不是「暂停」，可以立刻回落。
+                if item.kind == .player { WindowProbe.remember(pid: pid, id: appID) }
             }
 
             // 暂停但片源还开着 → 继续往下判定（activity = 0，详情里标「已暂停」）
@@ -1388,12 +1569,21 @@ enum PlaybackWatcher {
 
             if !playing {
                 // 网页暂停：页面里的 <video> 还在，只是时间轴停住了。
-                // 回页面里问一句拿它的画质，HDR 的就别收回去。
+                // 回页面里问一句拿它的画质，HDR 的就别收回去。切换标签、
+                // 切到别的 App 都不算结束 —— 只看那个网页有没有被关掉。
                 if item.kind == .streaming, keepPaused,
                    let web = WebProbe.pausedProbe(bundleID: appID) {
+                    var verdict = web.verdict
+                    var detail = web.detail
+                    // 暂停后控件可能被收起来，画质读不到 —— 页面还在，
+                    // 就沿用刚才判过的结果，别因为「读不到」而掉色。
+                    if verdict == .unknown, let last = lastJudge(name) {
+                        verdict = last.verdict
+                        detail = last.detail + " · 页面还开着"
+                    }
                     result.append(MediaSession(appName: name, path: nil,
-                                               verdict: web.verdict,
-                                               detail: web.detail + " · 已暂停",
+                                               verdict: verdict,
+                                               detail: detail + " · 已暂停",
                                                kind: .streaming, evidence: .webProbe,
                                                activity: 0))
                     continue
@@ -1402,24 +1592,31 @@ enum PlaybackWatcher {
                 // 本地播放器暂停：断言被收回、焦点也可能不在它身上。
                 // 前提是「它刚才真的在播」（liveAt）—— 否则刚打开 App 就会承接
                 // 上一场的判定，表现就是「一打开 Infuse 屏幕就跳 HDR」。
-                guard keepPaused, item.kind == .player,
-                      let playedAt = liveAt(appID),
-                      Date().timeIntervalSince(playedAt) < pausedMaxAge
+                guard keepPaused, item.kind == .player, let playedAt = liveAt(appID)
                 else { continue }
+
+                // 播放界面已经换掉了（退回媒体库 / 关掉片子 / 播放窗口没了）：
+                // 这是「停止播放」，不是「暂停」。以前只按时间硬撑，于是片子关掉
+                // 之后 HDR 还挂着，非得把播放器整个退掉才回落。
+                let ui = WindowProbe.interfaceChanged(pid: pid, id: appID)
+                if ui == true { continue }
+                // 界面还在 → 真暂停，可以长时间保持；读不到界面（没有屏幕录制
+                // 权限 / 播放器不设窗口标题）就只能按时间兜，别兜太久。
+                let limit: TimeInterval = ui == false ? pausedMaxAge : pausedSoftAge
+                guard Date().timeIntervalSince(playedAt) < limit else { continue }
 
                 let openPaths = mediaPaths.isEmpty ? smbPaths : mediaPaths
                 if !wasPlaying(appID, paths: openPaths) {
                     // 本机完全看不到的片源（Infuse 播网络 / 远程共享）：既没有句柄，
-                    // smbd 也未必一直开着。改用系统的「正在播放」注册判断 —— 它还
-                    // 挂着说明片子没关，只是停住了，那就沿用它刚才的判定。
-                    // 注册也不在时给一小段宽限，兜住上报抖动；再久就认作播完了。
+                    // smbd 也未必一直开着。看系统的「正在播放」里还有没有内容 ——
+                    // 暂停时它还挂着（控制中心仍显示片名和进度），停止播放才清空。
                     guard let last = lastJudge(name) else { continue }
-                    let loaded = MediaRemote.isLoaded(bundleID: appID)
                     let age = Date().timeIntervalSince(last.at)
-                    guard age < (loaded ? pausedMaxAge : pausedGrace) else { continue }
+                    guard age < limit else { continue }
                     result.append(MediaSession(appName: name, path: last.path,
                                                verdict: last.verdict,
-                                               detail: last.detail + " · 已暂停",
+                                               detail: last.detail + " · 已暂停"
+                                                   + (ui == false ? " · 界面还在" : " · 界面未知"),
                                                kind: item.kind, evidence: last.evidence,
                                                activity: 0))
                     continue
@@ -1434,7 +1631,7 @@ enum PlaybackWatcher {
                 for path in mediaPaths {
                     let probe = MediaProbe.shared.probe(path: path)
                     var detail = probe.detail
-                    if activity == 0 { detail += " · 已暂停" }
+                    if activity == 0 { detail += heldPaused ? " · 已暂停（片源句柄仍在）" : " · 已暂停" }
                     let s = MediaSession(appName: name, path: path, verdict: probe.verdict,
                                          detail: detail, kind: item.kind,
                                          evidence: probe.evidence, activity: activity)
@@ -1455,7 +1652,7 @@ enum PlaybackWatcher {
                 for path in smbPaths {
                     let probe = MediaProbe.shared.probe(path: path)
                     var detail = probe.detail + " · 经 SMB 共享"
-                    if activity == 0 { detail += " · 已暂停" }
+                    if activity == 0 { detail += heldPaused ? " · 已暂停（片源句柄仍在）" : " · 已暂停" }
                     let s = MediaSession(appName: name, path: path, verdict: probe.verdict,
                                          detail: detail, kind: item.kind,
                                          evidence: probe.evidence, activity: activity)
@@ -1521,18 +1718,19 @@ enum PlaybackWatcher {
     // MARK: 暂停
 
     /// 读不到片源的播放器，暂停后最多沿用上次判定多久。
-    /// 系统「正在播放」注册通常关掉片子就撤销，这里只是兜底：万一某个 App
-    /// 一直不清注册，也不至于把 HDR 无限期挂下去。
-    private static let pausedMaxAge: TimeInterval = 45 * 60
+    /// 有了「播放界面还在不在」这条之后，暂停可以被准确识别；这里只是兜底：
+    /// 万一某个 App 一直不清注册、窗口标题又读不到，也不至于把 HDR 无限期挂着。
+    private static let pausedMaxAge: TimeInterval = 30 * 60
 
     /// 正在播、但这一轮读不到片源时，沿用上次判定多久。
     /// Infuse 播共享片源时 smbd 的句柄是时有时无的，读不到不等于没在播。
     private static let carryMaxAge: TimeInterval = 30 * 60
 
-    /// 暂停、且拿不到「系统正在播放」注册时，还沿用多久。
-    /// 不用太短：Infuse 这类播放器有的版本根本不往控制中心登记，看不出来它
-    /// 是「暂停」还是「播完」——用户明确说过暂停不要掉色，那就宁可多等一会儿。
-    private static let pausedGrace: TimeInterval = 10 * 60
+    /// 暂停、既没有片源句柄也没有播放界面证据时，还沿用多久。
+    /// 这是「分辨不出暂停和关片」时的取舍：设短了暂停会掉色，设长了关掉片子
+    /// 还要挂很久（用户之前抱怨「非得退出整个 App 才回落」）。8 分钟是个折中 ——
+    /// 授权屏幕录制后这条基本用不上了，界面一变就立刻回落。
+    private static let pausedSoftAge: TimeInterval = 8 * 60
 
     /// 每个 App 最近一次判出的结果（暂停且读不到片源时沿用）。
     private static let judgeLock = NSLock()
@@ -1620,6 +1818,7 @@ enum PlaybackWatcher {
             livePaths[id] = nil
             liveSeenAt[id] = nil
             liveLock.unlock()
+            WindowProbe.forget(id: id)
         }
         judgeLock.lock()
         judgeByName[name] = nil

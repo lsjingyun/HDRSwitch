@@ -433,6 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         CGDisplayRegisterReconfigurationCallback(displayReconfigured, nil)
         registerHotKey()
+        // 先探一次「能不能读播放器窗口标题」：读得到就能分清「暂停」和「关掉片子」，
+        // 读不到就退回按时间兜底（这一步在后台跑，不会拖慢启动）
+        WindowProbe.warmUp()
         refreshUI()
 
         AutoHDR.shared.displayProvider = { [weak self] in self?.activeDisplay ?? CGMainDisplayID() }
@@ -606,6 +609,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pausedItem.state = auto.keepPaused ? .on : .off
         autoOptions.addItem(pausedItem)
 
+        // 「暂停」和「关掉片子」在系统信号里长得一样，唯一分得开的是播放界面 ——
+        // 那需要屏幕录制权限。给了就能做到「关掉片子立刻回落」。
+        let winOK = WindowProbe.titlesAvailable
+        let winItem = NSMenuItem(
+            title: winOK ? "暂停 / 停播识别：精确（读得到播放界面）"
+                         : "暂停 / 停播识别：点击授权（分清「暂停」和「关掉片子」）",
+            action: winOK ? nil : #selector(menuGrantScreenRecording),
+            keyEquivalent: "")
+        winItem.target = self
+        winItem.isEnabled = !winOK
+        autoOptions.addItem(winItem)
+
         let smbAccess = SMBService.hasAccess()
         let smbItem = NSMenuItem(
             title: smbAccess ? "共享片源识别：已就绪" : "共享片源识别：点击安装（读共享里的片源）",
@@ -776,6 +791,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func menuToggleForceTopHDR() {
         WebProbe.forceTopHDR.toggle()
         HUD.shared.show(WebProbe.forceTopHDR ? "解锁后直接选最高 HDR 画质：已开启" : "解锁后直接选最高 HDR 画质：已关闭")
+        refreshUI()
+    }
+
+    /// 申请「屏幕录制」权限：有了它才能读播放器窗口标题，
+    /// 从而分辨「暂停」和「关掉片子」—— 前者保持 HDR，后者立刻回落。
+    @objc private func menuGrantScreenRecording() {
+        if CGPreflightScreenCaptureAccess() {
+            WindowProbe.resetAvailability()
+            if WindowProbe.titlesAvailable {
+                HUD.shared.show("播放界面识别已可用")
+            } else {
+                HUD.shared.show("已授权，请重启 HDRSwitch 生效")
+            }
+        } else {
+            _ = CGRequestScreenCaptureAccess()
+            // 系统框点完之后再探一次；一般要重启 App 才真正生效
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                WindowProbe.resetAvailability()
+                HUD.shared.show(WindowProbe.titlesAvailable
+                                ? "播放界面识别已可用"
+                                : "授权后请重启 HDRSwitch")
+            }
+        }
         refreshUI()
     }
 
@@ -951,6 +989,21 @@ func runCLI(_ command: String) -> Never {
         }
         exit(0)
 
+    case "mr":
+        print("接口可用: \(MediaRemote.available ? "是" : "否")")
+        print("正在播放(IsPlaying): \(MediaRemote.isPlaying().map { $0 ? "是" : "否" } ?? "读不到")")
+        print("正在播放 PID: \(MediaRemote.nowPlayingPid().map { String($0) } ?? "读不到")")
+        let cs = MediaRemote.clients()
+        print("注册的客户端: \(cs.isEmpty ? "无" : "")")
+        for c in cs { print("  \(c.bundleID)  pid=\(c.pid)") }
+        let info = MediaRemote.nowPlayingInfo()
+        print("媒体信息: \(info.isEmpty ? "无（没有正在播放的内容）" : "")")
+        for (k, v) in info.sorted(by: { $0.key < $1.key }) where !k.hasPrefix("kMRMediaRemoteNowPlayingInfoArtwork") {
+            print("  \(k.replacingOccurrences(of: "kMRMediaRemoteNowPlayingInfo", with: "")): \(v)")
+        }
+        print("有内容: \(MediaRemote.hasContent() ? "是" : "否") · 属主: \(MediaRemote.contentBundleID() ?? "未知")")
+        exit(0)
+
     case "why":
         // 排查「为什么没自动切换」：把现场信号、自动模式状态、最近日志一次列出来
         let u = UserDefaults.standard
@@ -1061,7 +1114,7 @@ func runCLI(_ command: String) -> Never {
 
 // MARK: - 入口
 
-let cliCommands: Set<String> = ["on", "off", "toggle", "status", "list", "modes", "detect", "sessions", "auto", "menu", "why", "smb", "web"]
+let cliCommands: Set<String> = ["on", "off", "toggle", "status", "list", "modes", "detect", "sessions", "auto", "menu", "why", "smb", "web", "mr"]
 
 if let first = CommandLine.arguments.dropFirst().first?.lowercased(), cliCommands.contains(first) {
     runCLI(first)
