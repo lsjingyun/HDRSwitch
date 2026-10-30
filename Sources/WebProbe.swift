@@ -25,6 +25,10 @@ struct WebProbeResult {
     var hdrAvailable = false
     /// 页面里的视频是「暂停」状态（画面停在那一帧上）
     var paused = false
+    /// 判定的是哪一页（`location.pathname`）。
+    /// 用它把「同一条视频暂停了」和「暂停在另一条视频上」分开 ——
+    /// 后者说明刚才那条 HDR 已经不在看了，不能拿旧判定替它续命。
+    var path = ""
 }
 
 /// 一次网页探测的结论。
@@ -88,20 +92,56 @@ enum WebProbe {
     /// 但路径仍在浏览器的标签列表里 —— 靠它把「还在」和「关掉了」分开。
     private static var lastPathAt: [String: (path: String, at: Date)] = [:]
 
-    /// 连续几轮「页面上确实没有视频」。一次读到空可能只是标签正在加载/切换，
-    /// 连读两轮才敢下结论说「那个网页被关掉了」。
-    private static var emptyStreak: [String: Int] = [:]
+    /// 「地址列表残缺、但读到的那些里没有那一页」连续出现几轮。
+    /// 只在有标签读不到地址时用得上，用来区分「没问全」和「真没了」。
+    private static var absentStreak: [String: Int] = [:]
 
+    /// 记下「这一页是 HDR」。
+    ///
+    /// 只在**确认判成 HDR** 时调：这个路径代表「那一条 HDR 片」。
+    /// 暂停在别的页面上（首页的预览视频、另一条普通视频）不该覆盖它，
+    /// 否则「关掉网页」和「暂停在别处」就分不开了 —— 前者要回落，
+    /// 后者要等用户自己回去。
     private static func markPath(_ bundleID: String, path: String) {
         playLock.lock()
-        emptyStreak[bundleID] = 0
+        absentStreak[bundleID] = 0
         if !path.isEmpty { lastPathAt[bundleID] = (path, Date()) }
         playLock.unlock()
+    }
+
+    /// 把整条 URL 归一成路径。
+    ///
+    /// 探测脚本里报的是 `location.pathname`（如 `/video/BV1fyXzBgEsC/`），
+    /// 而向浏览器要标签地址拿到的是整条 URL（还带 `?spm_id_from=…&vd_source=…`）。
+    /// 两边不归一就永远对不上，于是「这一页还开着」永远判成「关掉了」——
+    /// 表现就是切个页面 HDR 就掉。这里统一成 pathname 再比。
+    static func pathOf(_ url: String) -> String {
+        var s = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if let r = s.range(of: "://") { s = String(s[r.upperBound...]) }
+        guard let slash = s.firstIndex(of: "/") else { return "/" }
+        s = String(s[slash...])
+        if let cut = s.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+            s = String(s[..<cut])
+        }
+        return s.isEmpty ? "/" : s
     }
 
     static func lastPath(bundleID: String) -> String? {
         playLock.lock(); defer { playLock.unlock() }
         return lastPathAt[bundleID]?.path
+    }
+
+    /// 最近一次「确认某个 HDR 页面已经关闭」的时间。
+    ///
+    /// 上层收 HDR 时会看它：这次是**确认页面没了**，还是**只是没读到**。
+    /// 前者该按正常宽限立刻回落，后者才值得多等一会儿 ——
+    /// 不然关掉网页之后还要干等十几秒，用户会以为「不回落了」。
+    private static var lastPageGoneAt: Date?
+    static func pageGoneRecently(_ within: TimeInterval = 30) -> Bool {
+        playLock.lock(); defer { playLock.unlock() }
+        guard let t = lastPageGoneAt else { return false }
+        return Date().timeIntervalSince(t) < within
     }
 
     /// 这一路最后一次「真的在播 / 暂停在某一页」的时间。
@@ -500,36 +540,95 @@ enum WebProbe {
             tell application "\(appName)"
                 set fb to ""
                 set pl to ""
+                set ul to ""
                 set cnt to 0
+                set hopen to 0
+                set miss to 0
+                -- 前台这一页只用轻量脚本问一句「在不在播」：跑完整脚本要几百毫秒，
+                -- 而前台往往正是用户在看的别的东西（首页、聊天），白跑一轮。
                 try
-                    set r0 to (do JavaScript js in current tab of front window)
+                    set fq to (do JavaScript lite in current tab of front window)
                     set cnt to cnt + 1
-                    if r0 contains "\\"play\\":1" then return r0
-                    if r0 contains "\\"paused\\":1" then set fb to r0
+                    if fq starts with "P|" then
+                        return (do JavaScript js in current tab of front window)
+                    end if
                 end try
-                set n to count of documents
-                if n = 0 then return fb
-                if n > 40 then set n to 40
-                repeat with i from 1 to n
+                -- 逐个窗口、逐个标签地问。Safari 的 `documents` 只覆盖一个窗口
+                -- 的当前标签：开着两个标签时也只报一条地址，于是「刚才那条 HDR
+                -- 那一页」被判成不见了 —— 切标签回落就是这里漏的。
+                repeat with w in windows
                     try
-                        set q to (do JavaScript lite in document i)
-                        set cnt to cnt + 1
-                        if q starts with "P|" then
-                            return (do JavaScript js in document i)
-                        end if
-                        if fb is "" and q starts with "S|" then
-                            set fb to (do JavaScript js in document i)
-                        end if
-                        if q starts with "N|" then
-                            if pl is "" then
-                                set pl to text 3 thru -1 of q
-                            else
-                                set pl to pl & "|" & (text 3 thru -1 of q)
+                        repeat with t in tabs of w
+                            set isR to 0
+                            -- 先要地址：这是纯属性读取，不碰网页进程，后台标签被系统
+                            -- 挂起时也读得到。判断「那一页还开着没有」全靠它。
+                            try
+                                set u to (URL of t)
+                                if u is missing value then
+                                    set miss to miss + 1
+                                else
+                                    if R is not "" and u contains R then
+                                        set hopen to 1
+                                        set isR to 1
+                                    end if
+                                    if ul is "" then
+                                        set ul to u
+                                    else
+                                        set ul to ul & "|" & u
+                                    end if
+                                end if
+                            on error
+                                -- 有标签的地址没读到：这份地址列表就是残缺的，
+                                -- 不能拿它断言「那一页不见了」（会让正常页面被误判关掉）。
+                                set miss to miss + 1
+                            end try
+                            if isR = 1 or R is "" then
+                                try
+                                    set q to (do JavaScript lite in t)
+                                    set cnt to cnt + 1
+                                    if q starts with "P|" then
+                                        return (do JavaScript js in t)
+                                    end if
+                                    if (length of q) > 2 then
+                                        set qp to text 3 thru -1 of q
+                                        -- 「刚才那条 HDR 那一页」优先：其它标签上也有暂停的
+                                        -- 视频（首页预览、另一条片子），抢先把结果带回去的话，
+                                        -- 上层会以为你看的是那一页，判定就跟着错了。
+                                        if q starts with "S|" then
+                                            if R is not "" and qp is R then
+                                                return (do JavaScript js in t)
+                                            end if
+                                            if fb is "" then set fb to (do JavaScript js in t)
+                                        end if
+                                        if q starts with "N|" then
+                                            if pl is "" then
+                                                set pl to qp
+                                            else
+                                                set pl to pl & "|" & qp
+                                            end if
+                                        end if
+                                    end if
+                                end try
                             end if
-                        end if
+                        end repeat
                     end try
                 end repeat
-                if fb is "" then return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"n\\":" & (cnt as string) & "}"
+                -- 「刚才那条 HDR 那一页」还在标签列表里，就一律按「它还开着」报回去，
+                -- 别的标签上暂停的视频不能顶替它。这不是小概率情况：B 站首页
+                -- 有暂停的预览片，一切过去探测就先撞上它，画质判成 SDR 之后
+                -- 上层就会把 HDR 收掉 —— 用户看到的就是「暂停后切页面又回落」。
+                if R is not "" then
+                    if hopen = 1 then
+                        return "{\\"play\\":0,\\"paused\\":1,\\"url\\":\\"" & R & "\\",\\"open\\":1}"
+                    end if
+                    -- 反过来：那一页已经不在任何标签里了，就按「页面没了」报，
+                    -- 同样不能让别的标签上的暂停页顶替 —— 否则关掉网页之后
+                    -- 一条首页预览片就能替它续着 HDR。
+                    return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"urls\\":\\"" & ul & "\\",\\"n\\":" & (cnt as string) & ",\\"miss\\":" & (miss as string) & "}"
+                end if
+                if fb is "" then
+                    return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"urls\\":\\"" & ul & "\\",\\"n\\":" & (cnt as string) & ",\\"miss\\":" & (miss as string) & "}"
+                end if
                 return fb
             end tell
             """
@@ -538,35 +637,74 @@ enum WebProbe {
             tell application "\(appName)"
                 set fb to ""
                 set pl to ""
+                set ul to ""
                 set cnt to 0
+                set hopen to 0
+                set miss to 0
                 try
-                    set r0 to (execute (active tab of front window) javascript js)
+                    set fq to (execute (active tab of front window) javascript lite)
                     set cnt to cnt + 1
-                    if r0 contains "\\"play\\":1" then return r0
-                    if r0 contains "\\"paused\\":1" then set fb to r0
+                    if fq starts with "P|" then
+                        return (execute (active tab of front window) javascript js)
+                    end if
                 end try
                 repeat with w in windows
                     repeat with t in tabs of w
+                        set isR to 0
                         try
-                            set q to (execute t javascript lite)
-                            set cnt to cnt + 1
-                            if q starts with "P|" then
-                                return (execute t javascript js)
-                            end if
-                            if fb is "" and q starts with "S|" then
-                                set fb to (execute t javascript js)
-                            end if
-                            if q starts with "N|" then
-                                if pl is "" then
-                                    set pl to text 3 thru -1 of q
+                            set u to (URL of t)
+                            if u is missing value then
+                                set miss to miss + 1
+                            else
+                                if R is not "" and u contains R then
+                                    set hopen to 1
+                                    set isR to 1
+                                end if
+                                if ul is "" then
+                                    set ul to u
                                 else
-                                    set pl to pl & "|" & (text 3 thru -1 of q)
+                                    set ul to ul & "|" & u
                                 end if
                             end if
+                        on error
+                            set miss to miss + 1
                         end try
+                        if isR = 1 or R is "" then
+                            try
+                                set q to (execute t javascript lite)
+                                set cnt to cnt + 1
+                                if q starts with "P|" then
+                                    return (execute t javascript js)
+                                end if
+                                if (length of q) > 2 then
+                                    set qp to text 3 thru -1 of q
+                                    if q starts with "S|" then
+                                        if R is not "" and qp is R then
+                                            return (execute t javascript js)
+                                        end if
+                                        if fb is "" then set fb to (execute t javascript js)
+                                    end if
+                                    if q starts with "N|" then
+                                        if pl is "" then
+                                            set pl to qp
+                                        else
+                                            set pl to pl & "|" & qp
+                                        end if
+                                    end if
+                                end if
+                            end try
+                        end if
                     end repeat
                 end repeat
-                if fb is "" then return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"n\\":" & (cnt as string) & "}"
+                if R is not "" then
+                    if hopen = 1 then
+                        return "{\\"play\\":0,\\"paused\\":1,\\"url\\":\\"" & R & "\\",\\"open\\":1}"
+                    end if
+                    return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"urls\\":\\"" & ul & "\\",\\"n\\":" & (cnt as string) & ",\\"miss\\":" & (miss as string) & "}"
+                end if
+                if fb is "" then
+                    return "{\\"play\\":0,\\"pgs\\":\\"" & pl & "\\",\\"urls\\":\\"" & ul & "\\",\\"n\\":" & (cnt as string) & ",\\"miss\\":" & (miss as string) & "}"
+                end if
                 return fb
             end tell
             """
@@ -576,6 +714,11 @@ enum WebProbe {
         return "on run argv\nset js to item 1 of argv\n"
             + "set lite to \"N|\"\n"
             + "try\nset lite to item 2 of argv\nend try\n"
+            + "set R to \"\"\n"
+            + "try\nset R to item 3 of argv\nend try\n"
+            // 路径太短（比如首页的 "/"）不能拿来当「同一页」的判据：
+            // `u contains R` 会匹配上任何地址，于是永远认为那一页还开着。
+            + "if (length of R) < 2 then set R to \"\"\n"
             + "\(body)\nreturn \"\"\nend run"
     }
 
@@ -613,18 +756,27 @@ enum WebProbe {
         var cached: (at: Date, state: WebState, result: WebProbeResult?)?
         var backingOff = false
         helperQueue.sync {
-            if let c = cache[bundleID], Date().timeIntervalSince(c.at) < 3 { cached = c }
+            // 缓存只用来挡「同一轮里被问了好几次」，不是用来省探测次数 ——
+            // 轮询本身是 0.8 秒一次且在上一轮返回前不会再进来。
+            // 所以取一个 tick 的长度就够了：再长，关掉页面后要干等这一段
+            // 才轮到判定，用户感觉就是回落慢。
+            if let c = cache[bundleID], Date().timeIntervalSince(c.at) < 0.8 { cached = c }
             if let d = errorBackoffUntil, Date() < d { backingOff = true }
         }
         if let c = cached { return (c.state, c.result) }
         if backingOff { return (.failed, nil) }
 
         let started = Date()
+        // 把「刚才那条 HDR 是哪一页」一并交给脚本：标签页里可能同时挂着好几个
+        // 暂停的视频（首页预览、另一条片子），必须优先回到那一页去问，
+        // 否则答案会出自别的页面，判定跟着错 —— 关掉网页不回落就是这么来的。
+        let remember = lastPath(bundleID: bundleID) ?? ""
         let (json, error) = run(script(for: info.name, safariStyle: info.safari),
                                 js: "var __hdrsHDR=\(displayHDR && unlockHiddenHDR);\n"
                                   + "var __hdrsForce=\(forceTopHDR);\n"
                                   + "var __hdrsCapH=\(displayPixelHeight);\n" + js,
-                                lite: lite)
+                                lite: lite,
+                                remember: remember)
 
         // 三种「没在播」必须分清，否则上层只能一刀切当成「播放结束」：
         //   .empty  —— 确实读到了页面，页面里没有视频（标签关了 / 换站了）
@@ -644,10 +796,13 @@ enum WebProbe {
             if playing {
                 state = .playing
                 result = judge(obj)
-                if result != nil {
+                if var r = result {
+                    r.path = (obj["url"] as? String) ?? ""
+                    result = r
                     lastJudgedAt = Date()
                     markPlaying(bundleID)
-                    markPath(bundleID, path: (obj["url"] as? String) ?? "")
+                    // 只有判成 HDR 才记「这一页就是那条 HDR」
+                    if r.verdict == .hdr { markPath(bundleID, path: r.path) }
                 }
                 // 记下「刚刚重建过播放器」的时间点：随后几秒看不到播放会话是正常的
                 if (obj["txt"] as? String ?? "").contains("reinit=1") { lastReinitAt = Date() }
@@ -657,14 +812,22 @@ enum WebProbe {
                 // 读不到画质也别急着否定 —— 页面还在就还有可能是 HDR，
                 // 上层会拿「上次判过的结果」接上。
                 state = .paused
-                markPath(bundleID, path: (obj["url"] as? String) ?? "")
+                let pagePath = (obj["url"] as? String) ?? ""
+                if Log.enabled {
+                    let held = (obj["open"] as? Int) == 1
+                    Log.write("网页探测：暂停页=\(pagePath.isEmpty ? "-" : pagePath)"
+                              + " 记忆=\(lastPath(bundleID: bundleID) ?? "-")"
+                              + (held ? " · 画面读不到但标签还在" : ""))
+                }
                 if var r = judge(obj) {
                     r.paused = true
+                    r.path = pagePath
                     result = r
+                    if r.verdict == .hdr { markPath(bundleID, path: pagePath) }
                 } else {
                     result = WebProbeResult(verdict: .unknown,
                                             detail: "网页暂停 · 画质未读到",
-                                            paused: true)
+                                            paused: true, path: pagePath)
                 }
             } else if !jsErr.isEmpty {
                 state = .failed
@@ -675,33 +838,79 @@ enum WebProbe {
             } else {
                 // 页面上确实一个视频都没有。这时还不能断言「网页关了」——
                 // 后台标签待久了会被系统回收，`<video>` 读不到，但页面还在。
-                // 脚本会把各标签的路径带回来：里面还有「刚才播的那一页」，
-                // 就当成还在看（暂停），只剩它真的不在了才算关掉。
+                //
+                // 判断「那一页还在不在」不能只看 JS 的结果：后台标签的网页进程
+                // 会被 Safari 挂起，`do JavaScript` 直接失败，跟「页面被关掉」
+                // 长得一模一样 —— 用户切个页面 HDR 就掉，就是这么来的。
+                // 所以另外要一份「全部标签的地址」：那是纯属性读取，不碰网页进程，
+                // 标签挂起也读得到。地址还在 = 页面还开着 = HDR 继续留着。
                 let pages = ((obj["pgs"] as? String) ?? "")
                     .split(separator: "|").map(String.init)
+                let urls = ((obj["urls"] as? String) ?? "")
+                    .split(separator: "|").map { pathOf(String($0)) }
+                    .filter { !$0.isEmpty }
                 var stillOpen = false
                 playLock.lock()
                 let last = lastPathAt[bundleID]
                 playLock.unlock()
-                if !pages.isEmpty, let last, !last.path.isEmpty,
-                   pages.contains(last.path),
-                   Date().timeIntervalSince(last.at) < 6 * 3600 {
+                if let last, !last.path.isEmpty,
+                   Date().timeIntervalSince(last.at) < 6 * 3600,
+                   pages.contains(last.path) || urls.contains(last.path) {
                     stillOpen = true
+                }
+                // 地址列表是否「读全」：只要有任何一个标签的地址没读到，
+                // 这份列表就是残缺的，不能拿它断言「那一页不见了」。
+                let miss = (obj["miss"] as? Int) ?? 0
+                let complete = miss == 0 && !urls.isEmpty
+                if Log.enabled {
+                    Log.write("网页探测：标签地址=\(urls.count) 未读=\(miss) 无视频页=\(pages.count) 记忆=\(last?.path ?? "-")")
                 }
                 if stillOpen {
                     state = .paused
                     result = WebProbeResult(verdict: .unknown,
                                             detail: "网页还开着 · 播放器暂时读不到",
                                             paused: true)
+                    playLock.lock(); absentStreak[bundleID] = 0; playLock.unlock()
+                } else if !complete {
+                    // 地址没读全（Safari 正忙 / 授权掉了 / 有标签读不到）：
+                    // 这不是「页面没了」，只是「没问到」，不能据此回落。
+                    //
+                    // 但要是「读到的那些地址里确实没有那一页」连续两轮都成立，
+                    // 那就真没了。只在地址残缺这种少见情况多等一轮，
+                    // 正常关闭仍然一轮就回落。
+                    let partly = !urls.isEmpty && last?.path.isEmpty == false
+                    var streak = 0
+                    if partly {
+                        playLock.lock()
+                        streak = (absentStreak[bundleID] ?? 0) + 1
+                        absentStreak[bundleID] = streak
+                        playLock.unlock()
+                    }
+                    if partly, streak >= 2 {
+                        state = .empty
+                        Log.write("网页判定：读到的标签里都没有那个页面（\(last?.path ?? "-")）· 回落", force: true)
+                        playLock.lock()
+                        lastPathAt[bundleID] = nil
+                        absentStreak[bundleID] = 0
+                        lastPageGoneAt = Date()
+                        playLock.unlock()
+                    } else {
+                        state = .failed
+                    }
                 } else {
-                    // 连读两轮都没视频，才认作「那个网页关了」。
-                    // 只读一轮就要么是标签还在加载，要么是脚本这会儿正忙 —
-                    // 一次误判的代价是屏幕掉色，多等一轮几乎没成本。
+                    // 地址读全了，里面确实没有那一页 —— 那就是关掉了，立刻判。
+                    // 以前这里还要「连续两轮、间隔 ≥5 秒」才敢下结论，用户关掉
+                    // 页面后要干等十几秒才回落。地址列表读全 + 那一页不在，
+                    // 已经是硬证据，再等只是把「确认」变成「拖延」。
+                    state = .empty
+                    if let last, !last.path.isEmpty {
+                        Log.write("网页判定：那个页面已不再任何一个标签里（\(last.path)）· 立即回落", force: true)
+                    }
                     playLock.lock()
-                    let streak = (emptyStreak[bundleID] ?? 0) + 1
-                    emptyStreak[bundleID] = streak
+                    lastPathAt[bundleID] = nil
+                    absentStreak[bundleID] = 0
+                    lastPageGoneAt = Date()
                     playLock.unlock()
-                    state = streak >= 2 ? .empty : .failed
                 }
             }
         } else if error.isEmpty {
@@ -894,13 +1103,15 @@ enum WebProbe {
     // MARK: - 执行
 
     /// 返回 (stdout, 错误说明)。错误说明为空表示跑通了。js 为 nil 时不传脚本参数
-    private static func run(_ script: String, js: String?, lite: String? = nil) -> (String, String) {
+    private static func run(_ script: String, js: String?, lite: String? = nil,
+                            remember: String? = nil) -> (String, String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        if let js = js, let lite = lite {
-            p.arguments = ["-e", script, "--", js, lite]
-        } else if let js = js {
-            p.arguments = ["-e", script, "--", js]
+        if let js = js {
+            var args = ["-e", script, "--", js]
+            if let lite = lite { args.append(lite) }
+            if let remember = remember { args.append(remember) }
+            p.arguments = args
         } else {
             p.arguments = ["-e", script]
         }

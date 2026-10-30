@@ -630,6 +630,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         smbItem.isEnabled = !smbAccess
         autoOptions.addItem(smbItem)
 
+        // 读外置盘 / 网络卷上的片源会触发系统授权框，而授权跟着签名走 ——
+        // 每次重新编译都要再点一遍。默认不读，靠文件名判定；需要精确时再打开。
+        let extItem = NSMenuItem(
+            title: MediaProbe.readExternal
+                ? "读取外置卷片源信息：已开启（会请求磁盘授权）"
+                : "读取外置卷片源信息：关闭（不弹磁盘授权，只按文件名判）",
+            action: #selector(menuToggleReadExternal), keyEquivalent: "")
+        extItem.target = self
+        extItem.state = MediaProbe.readExternal ? .on : .off
+        autoOptions.addItem(extItem)
+
         let streamItem = NSMenuItem(title: "网页视频一律按 HDR 切（读不到画质）", action: #selector(menuToggleStreaming), keyEquivalent: "")
         streamItem.target = self
         streamItem.state = auto.streamingAsHDR ? .on : .off
@@ -771,6 +782,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func menuToggleStreaming() {
         AutoHDR.shared.streamingAsHDR.toggle()
         refreshUI()
+    }
+
+    /// 是否读取外置盘 / 网络卷上的片源。
+    /// 关着时完全不碰这些文件：不会弹「想访问可移除宗卷上的文件」，
+    /// 代价是文件名看不出来的 HDR 片会按未知处理（不开 HDR）。
+    @objc private func menuToggleReadExternal() {
+        MediaProbe.readExternal.toggle()
+        HUD.shared.show(MediaProbe.readExternal
+                        ? "读取外置卷片源：已开启（会请求磁盘授权）"
+                        : "读取外置卷片源：已关闭（不再弹磁盘授权）")
+        refreshUI()
+        AutoHDR.shared.refresh()
     }
 
     /// 网页视频按实测画质切换（回页面里读清晰度标签 / 播放器色彩信息）

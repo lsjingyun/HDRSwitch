@@ -383,7 +383,43 @@ final class MediaProbe {
         .union(ebmlExtensions)
         .union(["flv", "wmv", "rmvb", "rm", "mpg", "mpeg", "vob", "iso", "3gp", "ogv", "asf"])
 
+    /// 要不要去读外置盘 / 网络卷上的片源。
+    ///
+    /// 打开这些卷上的文件会触发系统授权框（「想访问可移除宗卷上的文件」），
+    /// 而授权是跟**签名**绑定的 —— 每次重新编译换了签名就要再点一遍。
+    /// 默认不读：文件名带 HDR / DoVi / HLG 的照样判得出来，判不出的按未知处理，
+    /// 未知不会去开 HDR，所以最坏情况只是「这部片子不开 HDR」，不会误开。
+    static var readExternal: Bool {
+        get { UserDefaults.standard.bool(forKey: "readExternalMedia") }
+        set { UserDefaults.standard.set(newValue, forKey: "readExternalMedia") }
+    }
+
+    /// 路径是不是在「读它要系统授权」的卷上。
+    private static func onExternalVolume(_ path: String) -> Bool {
+        guard path.hasPrefix("/Volumes/") else { return false }
+        guard let vol = path.dropFirst("/Volumes/".count).split(separator: "/").first else { return true }
+        // 「Macintosh HD」这类名字是系统盘（符号链接到 /），读它不需要授权
+        let root = "/Volumes/" + vol
+        return URL(fileURLWithPath: root).resolvingSymlinksInPath().path != "/"
+    }
+
     func probe(path: String) -> ProbeResult {
+        // 名字里就能看出是 HDR 的，先按名字判。纯字符串操作，一个字节都不读，
+        // 也就不会弹出「想访问可移除宗卷上的文件」那个框。
+        if let named = Self.filenameVerdict(path) {
+            return ProbeResult(verdict: named, detail: "文件名标记", evidence: .filenameHint)
+        }
+
+        // 外置盘 / 网络卷默认一点都不碰 —— 连文件属性都不读。
+        // 读它们要系统授权，而授权跟着签名走，每换一次构建就问一遍。
+        // 没标记的片子按未知处理（不开 HDR），需要精确判定时菜单里打开开关。
+        if Self.onExternalVolume(path), !Self.readExternal {
+            if Log.enabled { Log.write("片源访问：\(path) · 外置卷，未读取") }
+            return ProbeResult(verdict: .unknown,
+                               detail: "外置卷 · 未读取片源（可在菜单里允许）",
+                               evidence: .none)
+        }
+
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -416,6 +452,9 @@ final class MediaProbe {
     private static let sizeLock = NSLock()
 
     static func isBeingWritten(_ path: String) -> Bool {
+        // 外置卷不读属性：这里 stat 一下同样会让系统来问「能不能访问这个卷」，
+        // 而它问一次就要你点一次（授权跟着构建签名走）。
+        if onExternalVolume(path), !readExternal { return false }
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         guard let attrs else { return false }
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? -1
@@ -435,6 +474,7 @@ final class MediaProbe {
     }
 
     private func probeUncached(path: String) -> ProbeResult {
+        if Log.enabled { Log.write("片源读取：\(path)") }
         let ext = (path as NSString).pathExtension.lowercased()
         if Self.avExtensions.contains(ext) {
             return Self.avFoundationProbe(path)
@@ -1334,37 +1374,142 @@ enum WindowProbe {
         Set(windowTitles(pid: pid).map(norm).filter { !$0.isEmpty })
     }
 
+    /// 该进程正常层窗口的「尺寸签名」（宽x高，去重）。
+    ///
+    /// 读窗口**标题**要屏幕录制权限，读**尺寸**不用。很多播放器（VidHub、Infuse）
+    /// 暂停时会把文件句柄和播放断言一起交出去，系统层面跟「关掉了」一模一样，
+    /// 唯一能分开的就是界面：播放窗口和媒体库窗口的尺寸通常差得很远。
+    /// 拿不到标题时用它兜底 —— 只能用来「确认变了」，不能用来「确认没变」。
+    private static func sizes(pid: Int32) -> Set<String> {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else { return [] }
+        var out = Set<String>()
+        for w in list {
+            guard let p = w[kCGWindowOwnerPID as String] as? Int32, p == pid,
+                  (w[kCGWindowLayer as String] as? Int) == 0,
+                  (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05
+            else { continue }
+            let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            let h = b["Height"] as? Double ?? 0
+            let wd = b["Width"] as? Double ?? 0
+            guard h >= 120, wd >= 120 else { continue }
+            out.insert("\(Int(wd))x\(Int(h))")
+        }
+        return out
+    }
+
+    /// 界面变化到什么程度。区分「确定关了」和「有点像变了」，
+    /// 因为前者可以立刻回落，后者还得留点缓冲。
+    enum InterfaceChange {
+        /// 播放窗口没了 / 明显退回媒体库小窗 —— 一定是停止播放
+        case gone
+        /// 尺寸有明显变化，但还不够断定（拖窗口、切换布局）
+        case altered
+        /// 界面还在，就是那一块
+        case same
+    }
+
     private static let lock = NSLock()
     private static var baseline: [String: Set<String>] = [:]
+    private static var sizeBaseline: [String: Set<String>] = [:]
+    /// 最后一次「确定已关闭」的时间。上层据此把回落宽限压到很短。
+    private static var closedAt: Date?
+
+    static func closedRecently(_ within: TimeInterval = 20) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let t = closedAt else { return false }
+        return Date().timeIntervalSince(t) < within
+    }
+
+    private static func markGone(_ why: String) -> InterfaceChange {
+        lock.lock()
+        // 同一个「已关闭」不用每轮都喊一遍：播放器退回媒体库之后就一直是这个状态，
+        // 反复记只会把日志刷满，也看不出别的线索。
+        let repeated = closedAt.map { Date().timeIntervalSince($0) < 5 } ?? false
+        closedAt = Date()
+        lock.unlock()
+        if !repeated {
+            Log.write("界面判为已关闭（\(why)）· 按停止播放处理", force: true)
+        }
+        return .gone
+    }
 
     /// 播放中记一份界面基线
     static func remember(pid: Int32, id: String) {
         let t = titles(pid: pid)
-        guard !t.isEmpty else { return }
+        let s = sizes(pid: pid)
+        guard !t.isEmpty || !s.isEmpty else { return }
         lock.lock()
-        baseline[id] = t
+        let fresh = (baseline[id] ?? []).isEmpty && (sizeBaseline[id] ?? []).isEmpty
+        if !t.isEmpty { baseline[id] = t }
+        if !s.isEmpty { sizeBaseline[id] = s }
+        // 又播起来了：上一场「已关闭」的记号作废，别把快速回落带进新一场。
+        closedAt = nil
         lock.unlock()
+        if fresh, s.count > 0, !titlesAvailable, Log.enabled {
+            Log.write("界面基线（窗口尺寸）：\(s.sorted().joined(separator: " "))")
+        }
     }
 
     /// 播放界面是否已经换掉。
-    /// - true  换掉了 / 窗口全关了 → 片子关了（停止播放、退回媒体库）
-    /// - false 还是那个界面 → 只是暂停
-    /// - nil   读不到标题（没权限），交给调用方按时间兜底
-    static func interfaceChanged(pid: Int32, id: String) -> Bool? {
+    /// - .gone   换掉了 / 窗口全关了 → 片子关了（停止播放、退回媒体库）
+    /// - .altered 有变化迹象，但不足以断定，交给调用方按短时限兜底
+    /// - .same   还是那个界面 → 只是暂停
+    /// - nil     读不到（没权限且尺寸也没变），交给调用方按时间兜底
+    static func interfaceChanged(pid: Int32, id: String) -> InterfaceChange? {
         lock.lock()
         let base = baseline[id]
+        let sBase = sizeBaseline[id]
         lock.unlock()
-        guard let base, !base.isEmpty else { return nil }
-        let raw = windowTitles(pid: pid)
-        if raw.isEmpty { return true }          // 播放窗口都没了 → 片子关了
-        let now = Set(raw.map(norm).filter { !$0.isEmpty })
-        guard !now.isEmpty else { return nil }  // 有窗口但读不到标题 → 没法判断
-        return now.isDisjoint(with: base)
+
+        if let base, !base.isEmpty, titlesAvailable {
+            let raw = windowTitles(pid: pid)
+            if raw.isEmpty { return markGone("播放窗口都没了") }
+            let now = Set(raw.map(norm).filter { !$0.isEmpty })
+            if !now.isEmpty {
+                // 标题是精确证据：播放界面的标题一个都不在了，就是退出了播放。
+                if now.isDisjoint(with: base) { return markGone("播放界面标题全变了") }
+                return .same
+            }
+        }
+        // 标题读不到（没授权）→ 退到尺寸签名：只能加速「变了」，不能断言「没变」。
+        if let sBase, !sBase.isEmpty, let b = area(sBase) {
+            let now = sizes(pid: pid)
+            if now.isEmpty { return markGone("一个窗口都不剩") }
+            guard let n = area(now) else { return nil }
+            let ratio = Double(n) / Double(b)
+            // 播放画面通常占满大半屏，退回媒体库只剩一个小窗 —— 面积差一个量级。
+            // 阈值取 0.35：拖一下窗口、切全屏都不会误伤，退回媒体库一定命中。
+            if ratio <= 0.35 {
+                return markGone("最大窗口 \(b) → \(n) 平方点（只剩 \(Int(ratio * 100))%）")
+            }
+            if ratio < 0.85 {
+                Log.write("界面可能变了（最大窗口 \(b) → \(n) 平方点）· 暂不结论", force: true)
+                return .altered
+            }
+            // 面积持平或变大：切全屏、拖大窗口 —— 界面还在，别当成关片。
+            return .same
+        }
+        return nil
+    }
+
+    /// 尺寸集合里最大的一块面积（宽x高，取字符串里的两个数）
+    private static func area(_ set: Set<String>) -> Int? {
+        var maxV = 0
+        for s in set {
+            let parts = s.split(separator: "x")
+            guard parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]) else { continue }
+            maxV = max(maxV, w * h)
+        }
+        return maxV > 0 ? maxV : nil
     }
 
     static func forget(id: String) {
         lock.lock()
         baseline[id] = nil
+        sizeBaseline[id] = nil
+        closedAt = nil
         lock.unlock()
     }
 }
@@ -1581,30 +1726,54 @@ enum PlaybackWatcher {
                     // 页面明确在播，只是这一轮没抓到系统的「媒体播放」断言
                     // （切到后台、断言还没立起来、或者刚重建过播放器）。
                     // 这种情况当然不能当成播放结束。
-                    if let web, state == .playing {
+                    //
+                    // 读不到画质（`web == nil`，比如暂停刚恢复、控件还没铺开）时
+                    // 也必须交一条会话上去：直接往下走会被 `guard keepPaused,
+                    // item.kind == .player` 拦掉，上层看到的是「这一路没有会话」，
+                    // 宽限一到 HDR 就掉 —— 表现就是「在播着，屏幕忽然暗一下」。
+                    if state == .playing {
                         let s = MediaSession(appName: name, path: nil,
-                                             verdict: web.verdict,
-                                             detail: web.detail,
+                                             verdict: web?.verdict ?? .unknown,
+                                             detail: web?.detail ?? "网页播放中 · 画质未读到",
                                              kind: .streaming, evidence: .webProbe,
                                              activity: 2 + (isFront ? 1 : 0))
                         result.append(s)
-                        if web.verdict != .unknown { noteJudge(s) }
+                        if let v = web?.verdict, v != .unknown { noteJudge(s) }
                         continue
                     }
                     if keepPaused, let web, state == .paused {
                         var verdict = web.verdict
                         var detail = web.detail
-                        // 暂停后控件可能被收起来，画质读不到 —— 页面还在，
-                        // 就沿用刚才判过的结果，别因为「读不到」而掉色。
-                        if verdict == .unknown, let last = lastJudge(name) {
+                        // 暂停在哪一页很重要：如果暂停的是**另一条**视频
+                        // （首页的预览、另一条普通视频），说明刚才那条 HDR
+                        // 已经不在看了 —— 不能拿上一次的判定替它续命，
+                        // 否则「关掉网页」和「暂停在别处」就分不开，HDR 会一直挂着。
+                        // 页面读不到路径（标签被挂起那种）时按同一页处理：
+                        // 那条路是 `stillOpen` 判出来的，本来就要求路径对得上。
+                        let hdrPage = WebProbe.lastPath(bundleID: appID)
+                        let samePage = web.path.isEmpty
+                            || (hdrPage != nil && web.path == hdrPage)
+                        // 暂停后控件可能被收起来，画质读不到；也可能读到个「1080P」
+                        // 之类的降级标签。同一页、暂停着，就沿用刚才判过的 HDR ——
+                        // 真要看 SDR 的话，用户一按播放就会读到，那时再收也不迟。
+                        if verdict != .hdr, samePage, let last = lastJudge(name),
+                           last.verdict == .hdr {
                             verdict = last.verdict
                             detail = last.detail + " · 页面还开着"
                         }
-                        result.append(MediaSession(appName: name, path: nil,
-                                                   verdict: verdict,
-                                                   detail: detail + " · 已暂停",
-                                                   kind: .streaming, evidence: .webProbe,
-                                                   activity: 0, paused: true))
+                        if verdict == .unknown && !samePage {
+                            continue
+                        }
+                        let s = MediaSession(appName: name, path: nil,
+                                             verdict: verdict,
+                                             detail: detail + " · 已暂停",
+                                             kind: .streaming, evidence: .webProbe,
+                                             activity: 0, paused: true)
+                        result.append(s)
+                        // 续一下判定的时间戳：暂停能挂很久（用户就是要挂很久），
+                        // 不续的话 10 分钟「探测暂不可用」的沿用期会先到，
+                        // 后面只要探测再抖一下，HDR 就掉了。
+                        if verdict != .unknown { touchJudge(name) }
                         continue
                     }
                     // 探测这次没跑通（超时 / 授权被拒 / 浏览器正忙）。
@@ -1612,13 +1781,19 @@ enum PlaybackWatcher {
                     // 用户看到的就是「暂停后切个页面 HDR 就没了」。
                     // 没读到 ≠ 关掉了：短时间内沿用上次判定，别把会话丢掉。
                     if keepPaused, state == .failed {
-                        if let last = lastJudge(name),
+                        // 前提是「那条 HDR 页还被认为开着」。页面被确认关掉后
+                        // `lastPath` 会被清空，这里就再也接不上了 —— 否则一轮
+                        // 抓空就能把会话复活，表现就是「关掉网页 HDR 一直挂着」。
+                        let pageOpen = WebProbe.lastPath(bundleID: appID) != nil
+                        if pageOpen, let last = lastJudge(name),
                            Date().timeIntervalSince(last.at) < webBlindGrace {
-                            result.append(MediaSession(appName: name, path: nil,
-                                                       verdict: last.verdict,
-                                                       detail: last.detail + " · 已暂停（探测暂不可用）",
-                                                       kind: .streaming, evidence: .webProbe,
-                                                       activity: 0, paused: true))
+                            let s = MediaSession(appName: name, path: nil,
+                                                 verdict: last.verdict,
+                                                 detail: last.detail + " · 已暂停（探测暂不可用）",
+                                                 kind: .streaming, evidence: .webProbe,
+                                                 activity: 0, paused: true)
+                            result.append(s)
+                            touchJudge(name)
                             continue
                         }
                         // 连历史判定都没有（比如 App 刚重启），但这一路不久前确实
@@ -1636,8 +1811,8 @@ enum PlaybackWatcher {
                             continue
                         }
                     }
-                    // state == .empty：确实读到了页面，里面已经没有视频 ——
-                    // 那个网页被关掉了，这才该回落。
+                    // state == .empty：确实读到了页面、也确认那一页已经不在标签
+                    // 列表里了 —— 那个网页被关掉了，这才该回落。
                 }
 
                 // 本地播放器暂停：断言被收回、焦点也可能不在它身上。
@@ -1650,10 +1825,10 @@ enum PlaybackWatcher {
                 // 这是「停止播放」，不是「暂停」。以前只按时间硬撑，于是片子关掉
                 // 之后 HDR 还挂着，非得把播放器整个退掉才回落。
                 let ui = WindowProbe.interfaceChanged(pid: pid, id: appID)
-                if ui == true { continue }
+                if ui == .gone { continue }
                 // 界面还在 → 真暂停，可以长时间保持；读不到界面（没有屏幕录制
                 // 权限 / 播放器不设窗口标题）就只能按时间兜，别兜太久。
-                let limit: TimeInterval = ui == false ? pausedMaxAge : pausedSoftAge
+                let limit: TimeInterval = ui == .same ? pausedMaxAge : pausedSoftAge
                 guard Date().timeIntervalSince(playedAt) < limit else { continue }
 
                 let openPaths = mediaPaths.isEmpty ? smbPaths : mediaPaths
@@ -1667,7 +1842,7 @@ enum PlaybackWatcher {
                     result.append(MediaSession(appName: name, path: last.path,
                                                verdict: last.verdict,
                                                detail: last.detail + " · 已暂停"
-                                                   + (ui == false ? " · 界面还在" : " · 界面未知"),
+                                                   + (ui == .same ? " · 界面还在" : " · 界面未知"),
                                                kind: item.kind, evidence: last.evidence,
                                                activity: 0, paused: true))
                     continue
@@ -1808,6 +1983,19 @@ enum PlaybackWatcher {
                 judgeByName[k] = nil
             }
         }
+    }
+
+    /// 只把「上一次判定」的时间戳续到此刻，不动内容。
+    ///
+    /// 暂停能挂很久（用户就是要它挂很久），而「探测暂不可用」只沿用 10 分钟。
+    /// 不续时间戳的话，挂上一会儿之后再碰上一次探测抖动，HDR 就掉了。
+    /// 注意不要用 noteJudge 来续 —— 它会把带「· 已暂停」这类后缀的详情写回去，
+    /// 每轮都往后拼一截，日志里的详情会越滚越长。
+    private static func touchJudge(_ name: String) {
+        judgeLock.lock()
+        defer { judgeLock.unlock() }
+        guard let old = judgeByName[name] else { return }
+        judgeByName[name] = (old.verdict, old.detail, old.path, old.evidence, Date())
     }
 
     private static func lastJudge(_ name: String)

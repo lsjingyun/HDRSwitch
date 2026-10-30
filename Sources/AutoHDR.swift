@@ -60,6 +60,10 @@ final class AutoHDR {
     private var lastOffAt: Date?
     /// 上一次看到的播放会话标识（App + 片源），换了片/换了播放器要重新接管
     private var lastIdentity = ""
+    /// 这次 HDR 是不是「网页视频」开出来的。
+    /// 网页这条路最不稳：换标签、浏览器正忙、脚本超时，都会让下一轮什么都读不到。
+    /// 收 HDR 时据此多等一会儿，别让 3 秒宽限把画面闪回去。
+    private var autoOnWasWeb = false
     /// 连续失败次数与下次允许重试时间
     private var failCount = 0
     private var nextRetryAt: Date?
@@ -131,6 +135,11 @@ final class AutoHDR {
 
     var isRunning: Bool { timer != nil }
 
+    /// 网页 HDR 的额外宽限（秒）：这一轮完全没读到会话时，多等这么久才回落。
+    /// 网页探测一轮抓空是常事（换标签、浏览器忙、脚本超时），3 秒宽限期
+    /// 根本不够它恢复 —— 用户看到的就是「切个页面 HDR 就掉」。
+    private let webHoldExtra: TimeInterval = 12
+
     // MARK: 生命周期
 
     func start() {
@@ -157,6 +166,9 @@ final class AutoHDR {
     }
 
     var isHolding: Bool { holdUntilSessionEnds }
+
+    /// 设置项改了之后立刻重算一次，不用等下一个轮询周期
+    func refresh() { tick() }
 
     /// 手动解除接管，让自动逻辑立刻重新生效
     func releaseHold() {
@@ -290,6 +302,7 @@ final class AutoHDR {
             if let t = nextRetryAt, Date() < t { onChange?(); return }
             // 连续两次命中才动作，防拖拽预览/选片时的瞬时误判
             guard activeStreak >= 2, !hdrOn, !HDRManager.shared.isBusy else { onChange?(); return }
+            autoOnWasWeb = (candidate?.kind == .streaming)
             applyAuto(true, display: d)
 
         case .keep:
@@ -304,8 +317,25 @@ final class AutoHDR {
             holdUntilSessionEnds = false
 
             // 只关「自己开的」：用户/系统自己开的 HDR 不碰
+            //
+            // 网页开出来的 HDR 还要多等一会儿：这一轮「什么都没读到」多半是
+            // Safari 正在换页 / 脚本超时，而不是播放结束。3 秒的宽限期它根本
+            // 来不及恢复，用户看到的就是「切个页面就闪回 SDR」。
+            //
+            // 但「确认已经关了」是硬证据，不该再等：
+            //   · 网页那一页已经不在任何标签里了；
+            //   · 播放器窗口退回媒体库（尺寸掉到播放时的三分之一以下）。
+            // 这两种情况再等满宽限期，用户感受到的就是「回落很慢」。
+            // 压到一个 tick 的量级，既立刻回落，又不至于在探测抖动的那一轮就动。
+            let hardGone = WebProbe.pageGoneRecently() || WindowProbe.closedRecently()
+            let need: TimeInterval
+            if hardGone {
+                need = min(grace, 0.6)
+            } else {
+                need = grace + ((candidate == nil && autoOnWasWeb) ? webHoldExtra : 0)
+            }
             guard hdrOn, hdrAppliedByAuto, let last = lastActiveAt,
-                  Date().timeIntervalSince(last) >= grace,
+                  Date().timeIntervalSince(last) >= need,
                   !HDRManager.shared.isBusy else { onChange?(); return }
             applyAuto(false, display: d)
         }
@@ -370,7 +400,7 @@ final class AutoHDR {
                         self.lastAction = "⚠︎ 多次切换失败，本场不再尝试（\(message)）"
                     }
                 }
-                if !on { self.lastActiveAt = nil; self.lastOffAt = Date() }
+                if !on { self.lastActiveAt = nil; self.lastOffAt = Date(); self.autoOnWasWeb = false }
                 Log.write("actuate on=\(on) ok=\(ok) msg=\(message)", force: true)
                 self.onChange?()
                 self.persistState()
