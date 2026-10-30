@@ -439,6 +439,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         AutoHDR.shared.onChange = { [weak self] in self?.refreshUI() }
         if AutoHDR.shared.enabled { AutoHDR.shared.start() }
 
+        // 播放器启动 / 退出 → 清掉它的历史判定。
+        // 不清的话「上一场看的是 HDR 片」会留到下一次打开 App：一露头就被当成
+        // 「暂停中」，屏幕直接跳 HDR（打开 Infuse 就变色的那个 bug）。
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        for noteName in [NSWorkspace.didLaunchApplicationNotification,
+                         NSWorkspace.didTerminateApplicationNotification] {
+            wsCenter.addObserver(forName: noteName, object: nil, queue: .main) { note in
+                guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                        as? NSRunningApplication else { return }
+                PlaybackWatcher.forget(bundleID: app.bundleIdentifier,
+                                       name: app.localizedName ?? "")
+            }
+        }
+
         // 共享片源（本机 SMB）识别靠特权小工具读 smbd 的句柄，启动时记一笔便于排查
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
             let title = SMBService.helperTitle()
@@ -683,7 +697,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         quit.target = self
         menu.addItem(quit)
 
+        // 版本号挂在最后：反馈问题时报一句就能对上包
+        let ver = NSMenuItem(title: "  " + AppDelegate.versionText, action: nil, keyEquivalent: "")
+        ver.isEnabled = false
+        menu.addItem(ver)
+
         return menu
+    }
+
+    /// 「HDRSwitch 1.0.4（build 5）」
+    static var versionText: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let v = info["CFBundleShortVersionString"] as? String ?? ""
+        let b = info["CFBundleVersion"] as? String ?? ""
+        if v.isEmpty { return "HDRSwitch" }
+        return b.isEmpty ? "HDRSwitch \(v)" : "HDRSwitch \(v)（build \(b)）"
     }
 
     @objc private func menuToggle() { toggleHDR(source: "menu") }

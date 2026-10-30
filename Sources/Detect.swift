@@ -130,6 +130,9 @@ enum SMBService {
     /// 特权小工具的路径（安装脚本放的固定位置）
     static let helperPath = "/usr/local/libexec/hdrswitch-smbdump"
 
+    /// 播放器启动 / 退出时清缓存：别拿上一轮读到的句柄表去判断刚起来的进程
+    static func invalidateCache() { cache = nil }
+
     /// 小工具是否已安装且可用
     static func helperAvailable() -> Bool {
         if let c = helperCacheOK, Date().timeIntervalSince(c.at) < 60 { return c.ok }
@@ -1178,6 +1181,14 @@ enum MediaRemote {
     static func isLoaded(bundleID: String) -> Bool {
         clients().contains { $0.bundleID == bundleID }
     }
+
+    /// 播放器启动 / 退出时清缓存：否则新启动的 App 会读到上一个进程留下的判断，
+    /// 表现就是「刚打开播放器，屏幕就跳 HDR」。
+    static func flushCaches() {
+        cachedPlaying = nil
+        cachedPid = nil
+        cachedClients = nil
+    }
 }
 
 // MARK: - 播放检测
@@ -1313,29 +1324,35 @@ enum PlaybackWatcher {
         let webBundles = DisplayAssertions.webPlaybackBundles()
         let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
-        // 系统「正在播放」只在有流媒体类 App 时才查
+        // 系统「正在播放」：播放器也要查 —— Infuse 这类走网络 / 共享的播放器，
+        // 进程里既没有句柄也不一定一直持断言，这份注册是它主动给的「我在放」信号。
         var nowPlaying: (playing: Bool, pid: Int32)?
-        if candidates.contains(where: { $0.kind == .streaming }),
-           let playing = MediaRemote.isPlaying(), let pid = MediaRemote.nowPlayingPid() {
+        if let playing = MediaRemote.isPlaying(), let pid = MediaRemote.nowPlayingPid() {
             nowPlaying = (playing, pid)
         }
+
+        // smbd 的句柄表一轮只读一次（读一次要起一回特权小工具，别每个 App 都来一遍）。
+        // 顺便和上一轮比一比：还重叠着说明这条片子在被持续读取，不是扫封面扫一下就关。
+        let smbNow: [String] = candidates.contains { $0.kind == .player }
+            ? SMBService.openMediaPaths().filter { shouldCountAsMedia($0) } : []
+        let smbSustained = !smbNow.isEmpty && !Set(smbNow).isDisjoint(with: lastSmbSet)
+        lastSmbSet = Set(smbNow)
 
         for item in candidates {
             let app = item.app
             let pid = app.processIdentifier
             let name = app.localizedName ?? "播放器"
+            let appID = app.bundleIdentifier ?? name
 
-            // 活跃度：只有「持防休眠断言」（真的在播）、「系统正在播放」或「当前前台」才算在用。
-            // 光开着文件不算 —— 否则播放器退出后残留的文件句柄会让 HDR 一直挂着不放。
-            // 唯一的例外是「暂停」，见下面那一段。
+            // 「在播」必须有硬证据：防休眠断言、系统「正在播放」且确实在播、网页媒体断言。
+            // 光开着 App、光开着文件都不算 —— 那是「准备播」，不是「在播」。
             let hasAssert = asserting.contains(pid)
             let isFront = pid == frontPid
-            let remotePlaying = item.kind == .streaming
-                && (nowPlaying?.playing ?? false) && nowPlaying?.pid == pid
+            let remotePlaying = (nowPlaying?.playing ?? false) && nowPlaying?.pid == pid
             // WebKit 的「Media Playback」断言：浏览器页内视频在播而不上报系统媒体信息时靠它
-            let webPlaying = item.kind == .streaming
-                && webBundles.contains(app.bundleIdentifier ?? "")
+            let webPlaying = item.kind == .streaming && webBundles.contains(appID)
             let playing = hasAssert || remotePlaying || webPlaying
+            // 活跃度：2 = 在播，1 = 只是前台开着，0 = 后台且没在播（多半是暂停）
             let activity = (playing ? 2 : 0) + (isFront ? 1 : 0)
 
             let mediaPaths = ProcFiles.openPaths(pid: pid).filter {
@@ -1344,42 +1361,71 @@ enum PlaybackWatcher {
 
             // 进程自己没有句柄时，片源可能由本机 smbd 代持 —— Infuse 走共享播放
             // 就是这种：真正 open() 文件的是服务端，播放器手里一个 fd 都没有。
-            // 这份必须在暂停判断之前拿到，否则暂停时无从确认片源还开着。
+            // 但 smbd 的句柄不能单独当证据：播放器打开媒体库、生成缩略图时也会让
+            // 服务端 open() 一堆视频，那些文件一个字节都没往屏幕上送 —— 之前「一
+            // 打开 Infuse 就跳 HDR」就是这么来的。所以只在「确实在播」或「要判暂停」
+            // 时才去读它。
             var smbPaths: [String] = []
-            if mediaPaths.isEmpty && item.kind == .player {
-                smbPaths = SMBService.openMediaPaths().filter { shouldCountAsMedia($0) }
+            if mediaPaths.isEmpty && item.kind == .player && (playing || keepPaused) {
+                smbPaths = smbNow
             }
+
+            // 光有 smbd 句柄还不够：播放器扫媒体库、读封面时也会让服务端 open()。
+            // 再加一条「它确实把媒体挂给了系统」—— 控制中心里能看到那个正在播放的东西，
+            // 说明是真的加载了一条片，而不是在后台翻目录。
+            // 注册碰上个别不登记的播放器也不至于全废：句柄上一轮就在（持续在读）也算。
+            let registered = smbPaths.isEmpty ? false : MediaRemote.isLoaded(bundleID: appID)
+            let smbTrusted = playing && (hasAssert || remotePlaying)
+                && (registered || smbSustained)
 
             // 刚确认「真的在播」的片源记一笔：暂停时靠它确认「还是那个片子」
             if playing {
-                markLive(app.bundleIdentifier ?? name, paths: mediaPaths + smbPaths)
+                markLive(appID, paths: mediaPaths + smbPaths)
             }
 
-            // 暂停是 activity == 0 的常态：IINA / VLC / Infuse 一按暂停就收回防休眠
-            // 断言，此刻若焦点又不在播放器上，以前整条会话会被丢掉 → 宽限期一到就
-            // 退回 SDR。现在只要「那个片源还开着、确实是它刚才在播的」就当暂停留在
-            // 场上；「开着」既可能是播放器自己的句柄，也可能是 smbd 手上的共享句柄。
-            if activity == 0 {
+            // 暂停但片源还开着 → 继续往下判定（activity = 0，详情里标「已暂停」）
+            var heldPaused = false
+
+            if !playing {
+                // 网页暂停：页面里的 <video> 还在，只是时间轴停住了。
+                // 回页面里问一句拿它的画质，HDR 的就别收回去。
+                if item.kind == .streaming, keepPaused,
+                   let web = WebProbe.pausedProbe(bundleID: appID) {
+                    result.append(MediaSession(appName: name, path: nil,
+                                               verdict: web.verdict,
+                                               detail: web.detail + " · 已暂停",
+                                               kind: .streaming, evidence: .webProbe,
+                                               activity: 0))
+                    continue
+                }
+
+                // 本地播放器暂停：断言被收回、焦点也可能不在它身上。
+                // 前提是「它刚才真的在播」（liveAt）—— 否则刚打开 App 就会承接
+                // 上一场的判定，表现就是「一打开 Infuse 屏幕就跳 HDR」。
+                guard keepPaused, item.kind == .player,
+                      let playedAt = liveAt(appID),
+                      Date().timeIntervalSince(playedAt) < pausedMaxAge
+                else { continue }
+
                 let openPaths = mediaPaths.isEmpty ? smbPaths : mediaPaths
-                guard keepPaused, item.kind == .player else { continue }
-                if !wasPlaying(app.bundleIdentifier ?? name, paths: openPaths) {
+                if !wasPlaying(appID, paths: openPaths) {
                     // 本机完全看不到的片源（Infuse 播网络 / 远程共享）：既没有句柄，
                     // smbd 也未必一直开着。改用系统的「正在播放」注册判断 —— 它还
                     // 挂着说明片子没关，只是停住了，那就沿用它刚才的判定。
                     // 注册也不在时给一小段宽限，兜住上报抖动；再久就认作播完了。
-                    if let last = lastJudge(name) {
-                        let loaded = MediaRemote.isLoaded(bundleID: app.bundleIdentifier ?? "")
-                        let age = Date().timeIntervalSince(last.at)
-                        if age < (loaded ? pausedMaxAge : pausedGrace) {
-                            result.append(MediaSession(appName: name, path: last.path,
-                                                       verdict: last.verdict,
-                                                       detail: last.detail + " · 已暂停",
-                                                       kind: item.kind, evidence: last.evidence,
-                                                       activity: 0))
-                        }
-                    }
+                    guard let last = lastJudge(name) else { continue }
+                    let loaded = MediaRemote.isLoaded(bundleID: appID)
+                    let age = Date().timeIntervalSince(last.at)
+                    guard age < (loaded ? pausedMaxAge : pausedGrace) else { continue }
+                    result.append(MediaSession(appName: name, path: last.path,
+                                               verdict: last.verdict,
+                                               detail: last.detail + " · 已暂停",
+                                               kind: item.kind, evidence: last.evidence,
+                                               activity: 0))
                     continue
                 }
+                // 句柄还对得上 → 是暂停，继续往下判定（activity = 0，详情会标「已暂停」）
+                heldPaused = true
             }
 
             if !mediaPaths.isEmpty {
@@ -1387,8 +1433,10 @@ enum PlaybackWatcher {
                 var best: MediaSession?
                 for path in mediaPaths {
                     let probe = MediaProbe.shared.probe(path: path)
+                    var detail = probe.detail
+                    if activity == 0 { detail += " · 已暂停" }
                     let s = MediaSession(appName: name, path: path, verdict: probe.verdict,
-                                         detail: probe.detail, kind: item.kind,
+                                         detail: detail, kind: item.kind,
                                          evidence: probe.evidence, activity: activity)
                     if best == nil || rank(s.verdict) > rank(best!.verdict) { best = s }
                 }
@@ -1402,7 +1450,7 @@ enum PlaybackWatcher {
             // 播放器进程里没有句柄，但文件来自「本机 SMB 共享」：
             // 真正 open() 它的是服务端 smbd，从这里取（需要完全磁盘访问权限）。
             // 暂停时同样走这条 —— 句柄还在，说明片源没关，只是不推进时间轴。
-            if !smbPaths.isEmpty {
+            if !smbPaths.isEmpty, smbTrusted || heldPaused {
                 var best: MediaSession?
                 for path in smbPaths {
                     let probe = MediaProbe.shared.probe(path: path)
@@ -1459,6 +1507,9 @@ enum PlaybackWatcher {
         }
     }
 
+    /// 上一轮 smbd 打开的视频文件（判断「是持续在读」还是「扫一下就关」）
+    private static var lastSmbSet: Set<String> = []
+
     private static func rank(_ v: HDRVerdict) -> Int {
         switch v {
         case .hdr: return 2
@@ -1478,9 +1529,10 @@ enum PlaybackWatcher {
     /// Infuse 播共享片源时 smbd 的句柄是时有时无的，读不到不等于没在播。
     private static let carryMaxAge: TimeInterval = 30 * 60
 
-    /// 暂停、且系统「正在播放」注册也已撤销时，还沿用多久。
-    /// 只当兜底用：这类播放器关掉片子通常就撤注册，留几分钟防上报抖动。
-    private static let pausedGrace: TimeInterval = 3 * 60
+    /// 暂停、且拿不到「系统正在播放」注册时，还沿用多久。
+    /// 不用太短：Infuse 这类播放器有的版本根本不往控制中心登记，看不出来它
+    /// 是「暂停」还是「播完」——用户明确说过暂停不要掉色，那就宁可多等一会儿。
+    private static let pausedGrace: TimeInterval = 10 * 60
 
     /// 每个 App 最近一次判出的结果（暂停且读不到片源时沿用）。
     private static let judgeLock = NSLock()
@@ -1521,21 +1573,29 @@ enum PlaybackWatcher {
     /// 还能对上 → 是暂停，保持；对不上 → 片源换了或关了，正常回落。
     private static let liveLock = NSLock()
     private static var livePaths: [String: Set<String>] = [:]
-    private static var liveAt: [String: Date] = [:]
+    private static var liveSeenAt: [String: Date] = [:]
 
     private static func markLive(_ id: String, paths: [String]) {
         guard !paths.isEmpty else { return }
         liveLock.lock()
         defer { liveLock.unlock() }
         livePaths[id] = Set(paths)
-        liveAt[id] = Date()
+        liveSeenAt[id] = Date()
         if livePaths.count > 64 {
             let now = Date()
-            for (k, t) in liveAt where now.timeIntervalSince(t) > 6 * 3600 {
+            for (k, t) in liveSeenAt where now.timeIntervalSince(t) > 6 * 3600 {
                 livePaths[k] = nil
-                liveAt[k] = nil
+                liveSeenAt[k] = nil
             }
         }
+    }
+
+    /// 这个 App 最近一次「真的在播」的时刻。播放器一启动 / 退出就清掉，
+    /// 于是「刚打开 App」永远不会被当成「暂停中」。
+    private static func liveAt(_ id: String) -> Date? {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        return liveSeenAt[id]
     }
 
     private static func wasPlaying(_ id: String, paths: [String],
@@ -1543,10 +1603,29 @@ enum PlaybackWatcher {
         guard !paths.isEmpty else { return false }
         liveLock.lock()
         defer { liveLock.unlock() }
-        guard let known = livePaths[id], let at = liveAt[id],
+        guard let known = livePaths[id], let at = liveSeenAt[id],
               Date().timeIntervalSince(at) < within
         else { return false }
         return !known.isDisjoint(with: Set(paths))
+    }
+
+    /// 播放器启动 / 退出时把它的历史判定清干净。
+    ///
+    /// 不清的话：上一场看的 HDR 片，关掉播放器、过一会儿再打开，
+    /// 「上次判的是 HDR」还留着，App 一露头就被当成「暂停中」把屏幕切到 HDR。
+    /// 现在一打开就是干净的，只有真的播起来才算数。
+    static func forget(bundleID: String?, name: String) {
+        if let id = bundleID {
+            liveLock.lock()
+            livePaths[id] = nil
+            liveSeenAt[id] = nil
+            liveLock.unlock()
+        }
+        judgeLock.lock()
+        judgeByName[name] = nil
+        judgeLock.unlock()
+        MediaRemote.flushCaches()
+        SMBService.invalidateCache()
     }
 
     /// 是不是「一个正在被播放的片源」。除了扩展名，还要排掉正在写入的文件：

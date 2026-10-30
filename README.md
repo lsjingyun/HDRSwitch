@@ -19,7 +19,7 @@ macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片�
 
 ## 下载
 
-**[HDRSwitch-1.0.3.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.3.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.0.4.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.4.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
 
 打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地 ad-hoc 签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
 
@@ -33,7 +33,7 @@ macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连�
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app，双击即用
-./package.sh    # → build/HDRSwitch-1.0.3.dmg，可分发
+./package.sh    # → build/HDRSwitch-1.0.4.dmg，可分发
 ```
 
 面向使用者的完整说明：**<https://lsjingyun.github.io/HDRSwitch/>**（即 [`docs/index.html`](docs/index.html)，单文件、无外部依赖，DMG 里也带一份，⌘P 可存 PDF）。

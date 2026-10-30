@@ -8,12 +8,14 @@ cd "$(dirname "$0")"
 
 APP_NAME="HDRSwitch"
 APP_PATH="build/${APP_NAME}.app"
-VOL_NAME="HDRSwitch"
 
-# ── 版本号（取自 Info.plist）
+# ── 版本号（取自 Info.plist）—— 打包产物一律带版本号，免得几个包分不清
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Resources/Info.plist)
+VOL_NAME="${APP_NAME} ${VERSION}"
 DMG="build/${APP_NAME}-${VERSION}.dmg"
 STAGE="build/dmg"
+
+echo "==> 0/5 版本 ${VERSION} → ${DMG}"
 
 echo "==> 1/5 编译"
 ./build.sh >/dev/null

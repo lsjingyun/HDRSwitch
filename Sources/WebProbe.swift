@@ -23,6 +23,8 @@ struct WebProbeResult {
     let detail: String
     /// 片源本身带 HDR 流，但当前画质不是 HDR（YouTube 在 SDR 下会把 HDR 选项藏起来）
     var hdrAvailable = false
+    /// 页面里的视频是「暂停」状态（画面停在那一帧上）
+    var paused = false
 }
 
 enum WebProbe {
@@ -54,6 +56,19 @@ enum WebProbe {
     static func recentlyJudged(_ within: TimeInterval = 60) -> Bool {
         guard let t = lastJudgedAt else { return false }
         return Date().timeIntervalSince(t) < within
+    }
+
+    /// 每个浏览器最近一次「确实在播网页视频」的时间（暂停保持要用）
+    private static let playLock = NSLock()
+    private static var lastPlayingAt: [String: Date] = [:]
+
+    private static func markPlaying(_ bundleID: String) {
+        playLock.lock(); lastPlayingAt[bundleID] = Date(); playLock.unlock()
+    }
+
+    private static func playingAt(_ bundleID: String) -> Date? {
+        playLock.lock(); defer { playLock.unlock() }
+        return lastPlayingAt[bundleID]
     }
 
     /// 最近一次读到的播放健康度（readyState / 缓冲 / 帧计数 / 前进量）。
@@ -97,7 +112,7 @@ enum WebProbe {
         /* 脚本版本号：每次改动脚本就把版本提一下，页面里那些常驻定时器
            （画质拉档、断流看门狗）会被清掉重建，免得用户还得手动刷新页面
            才能用上新逻辑。 */
-        var __hdrsVer='v3';
+        var __hdrsVer='v4';
         if(window.__hdrsVer!==__hdrsVer){
           window.__hdrsVer=__hdrsVer;
           try{ if(window.__hdrsQualTimer){ clearInterval(window.__hdrsQualTimer); window.__hdrsQualTimer=null; } }catch(eV1){}
@@ -178,11 +193,15 @@ enum WebProbe {
             }, 5000);
           }
         }catch(eW0){}
-        var vs=document.querySelectorAll('video'), v=null, fb=null;
+        var vs=document.querySelectorAll('video'), v=null, fb=null, pv=null;
         for(var i=0;i<vs.length;i++){
           var e=vs[i];
           if(!e.paused && !e.ended && e.readyState>=2 && e.videoWidth>0){ v=e; break; }
           if(!fb && !e.paused && !e.ended) fb=e;
+          /* 暂停中的那个 video 也记下来：暂停时它既不在播、也不算卡住，
+             但它停的那一帧还是 HDR，画质码也还挂在播放器上 —— 拿它判断
+             「这一场还没结束」，别一按暂停就把 HDR 收回去。 */
+          if(!pv && e.paused && !e.ended && e.videoWidth>0 && (e.currentTime>0 || e.duration>1)) pv=e;
         }
         /* 播放健康度。断流时（解码卡死、缓冲耗尽）播放器会自己暂停，或者 readyState
            掉到 2 以下、画面不再推进 —— 这时上面那条严格条件选不到 video，外面只能
@@ -217,10 +236,15 @@ enum WebProbe {
             out.w=fb.videoWidth; out.h=fb.videoHeight;
             out.txt='stall';
             out.health=health(fb).trim();
+            return JSON.stringify(out);
           }
-          return JSON.stringify(out);
+          if(!pv) return JSON.stringify(out);
+          /* 暂停：按「还在播」的路子把画质读出来，只是 play=0 + paused=1。
+             外面据此保持 HDR，而不是当成播放结束。 */
+          v=pv; out.paused=1; out.play=0;
         }
-        out.play=1; out.w=v.videoWidth; out.h=v.videoHeight;
+        if(!out.paused){ out.play=1; }
+        out.w=v.videoWidth; out.h=v.videoHeight;
         out.host=location.hostname;
         var t='';
         var q=document.querySelector('.bpx-player-ctrl-quality-result');
@@ -313,7 +337,7 @@ enum WebProbe {
            是初始化时按当时的能力建的，之后不会自己重算。带着当前进度重建一次播放器，
            它才会把 2160p HDR 拿出来。每个页面只做一次，避免反复打断。 */
         try{
-          if(typeof __hdrsHDR!=='undefined' && __hdrsHDR
+          if(typeof __hdrsHDR!=='undefined' && __hdrsHDR && !out.paused
              && t.indexOf('avail=hdr')>=0 && t.indexOf('yt=bt2020')<0 && t.indexOf('yt=smpte2084')<0){
             var mpr=document.getElementById('movie_player');
             if(mpr && typeof mpr.loadVideoByPlayerVars==='function' && typeof mpr.getVideoData==='function'){
@@ -345,7 +369,7 @@ enum WebProbe {
            为什么不靠 AppleScript 定时探测来干：那个几秒才跑一次，等它反应过来
            YouTube 早就自己退回 1080p 了。页面自己盯，2.5 秒一轮，及时得多。 */
         try{
-          if(want && !window.__hdrsQualTimer){
+          if(!out.paused && want && !window.__hdrsQualTimer){
             window.__hdrsQualTimer=setInterval(function(){
               try{
                 if(!(typeof __hdrsHDR!=='undefined' && __hdrsHDR)){
@@ -482,9 +506,17 @@ enum WebProbe {
             }
             if playing {
                 result = judge(obj)
-                if result != nil { lastJudgedAt = Date() }
+                if result != nil {
+                    lastJudgedAt = Date()
+                    markPlaying(bundleID)
+                }
                 // 记下「刚刚重建过播放器」的时间点：随后几秒看不到播放会话是正常的
                 if (obj["txt"] as? String ?? "").contains("reinit=1") { lastReinitAt = Date() }
+            } else if (obj["paused"] as? Int) == 1, var r = judge(obj) {
+                // 暂停：画面停在那一帧上，画质（B 站画质码 / 控件标签）还留着。
+                // 交给上层判断「这一场还没结束」，别一暂停就把 HDR 收回去。
+                r.paused = true
+                result = r
             }
         }
 
@@ -505,6 +537,19 @@ enum WebProbe {
             }
         }
         return result
+    }
+
+    /// 网页视频暂停时还能不能算「这一场还在」。
+    ///
+    /// 判据：页面里还留着一个停住的 `<video>`（画质标签也还在），并且这个浏览器
+    /// 半小时内确实播过 —— 免得一个早就停在那儿、人已经去干别的标签页把 HDR
+    /// 一直占着。
+    static func pausedProbe(bundleID: String) -> WebProbeResult? {
+        guard enabled else { return nil }
+        guard let r = probe(bundleID: bundleID), r.paused else { return nil }
+        guard let t = playingAt(bundleID),
+              Date().timeIntervalSince(t) < 30 * 60 else { return nil }
+        return r
     }
 
     /// 状态文案（菜单 / why 用）
