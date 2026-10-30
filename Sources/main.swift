@@ -980,6 +980,7 @@ func runCLI(_ command: String) -> Never {
         print("  网页视频: \(streamHDR ? "一律按 HDR 切（读不到画质，会误判 SDR）" : "只在读到 HDR 色彩标记时切")")
         print("  网页实测画质: \(WebProbe.enabled ? "开" : "关") · \(WebProbe.statusText())")
         print("  退出后宽限: \(grace > 0 ? Int(grace) : 30) 秒")
+        print("  暂停时: \((u.object(forKey: "autoKeepPaused") as? Bool ?? true) ? "保持 HDR（片源还开着就不收）" : "视为播放结束")")
         print("  手动接管中: \((u.bool(forKey: "autoHold")) ? "是（本场播放内不再自动切）" : "否")")
         let fails = u.integer(forKey: "autoFailCount")
         if fails > 0 {

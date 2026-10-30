@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.0.2 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.0.3 · 2026-10-30 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -568,6 +568,14 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 <!-- ══════════════════ 11 ══════════════════ -->
 <h2 id="log"><span class="n">11</span>版本记录</h2>
 
+<h3>1.0.3 · 2026-10-30</h3>
+<ul>
+  <li><b>暂停播放不再退回 SDR。</b>播放器一按暂停就会收回「正在播放」的电源断言（IINA、VLC、QuickTime 都是），旧逻辑据此判定「播完了」，宽限期一到就关掉 HDR——看片中途暂停一下，画面就掉回 SDR，还得再切回来。</li>
+  <li>现在改用另一个信号：<b>片源还开着吗</b>。只要播放器进程里还有这个文件的句柄，就当作暂停，暂停多久都保持 HDR，切到别的 App 也不影响。关掉片源、或退出播放器，才进入宽限期。</li>
+  <li>为了不把编码器、转码工具、预览窗当成播放器，这条只对白名单播放器、以及「刚刚确实播过这个文件」的 App 生效。</li>
+  <li>新增菜单项「暂停播放时保持 HDR」（默认开）。不想要这个行为就取消勾选，回到旧逻辑。</li>
+</ul>
+
 <h3>1.0.2 · 2026-10-30</h3>
 <ul>
   <li><b>图标现在会出现在 Launchpad 里。</b>之前 Info.plist 里标了 <code>LSUIElement</code>（「菜单栏专用 App」），macOS 会因此把 App 从 Launchpad 的图标列表和「应用程序」页里一并排除——只有 Spotlight 搜得到，翻是翻不到的。现在这个标记去掉了，改成启动后用 <code>setActivationPolicy(.accessory)</code> 收掉 Dock 图标：<b>行为完全一样</b>（没有 Dock 图标、不进 ⌘Tab、不抢焦点），但 Launchpad 和「应用程序」里能正常看到、正常点开。</li>
@@ -586,7 +594,7 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 </ul>
 
 <p class="foot">
-  HDRSwitch 1.0.2 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
+  HDRSwitch 1.0.3 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
   English: <a href="https://github.com/lsjingyun/HDRSwitch/blob/main/README.en.md">README.en.md</a> · 源码、下载与更新记录：<a href="https://github.com/lsjingyun/HDRSwitch">github.com/lsjingyun/HDRSwitch</a> · MIT 许可
 </p>
 
