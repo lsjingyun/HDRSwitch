@@ -135,7 +135,7 @@ final class AutoHDR {
 
     func start() {
         guard timer == nil else { return }
-        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
+        let t = Timer(timeInterval: 0.8, repeats: true) { [weak self] _ in self?.tick() }
         t.tolerance = 0.1
         RunLoop.main.add(t, forMode: .common)
         timer = t
