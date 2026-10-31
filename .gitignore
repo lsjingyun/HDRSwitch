@@ -13,3 +13,6 @@ DerivedData/
 .DS_Store
 ._*
 发布稿/
+
+# 本机备份（配置快照、未采用的补丁），不进仓库
+backup/

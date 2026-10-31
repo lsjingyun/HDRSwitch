@@ -50,6 +50,8 @@ if [ "$ok_uni" = "1" ]; then
     # 用户之前授予的「完全磁盘访问权限」会被系统当成另一个 App，全部失效。
     SIGN_ID="HDRSwitch Self Signed"
     SIGN_KC="$HOME/Library/Keychains/hdrswitch.keychain-db"
+    SIGN_PW="hdrswitch-local"   # 与 build.sh 保持一致；钥匙串默认会自己上锁
+    [ -f "$SIGN_KC" ] && { security unlock-keychain -p "$SIGN_PW" "$SIGN_KC" 2>/dev/null || true; }
     if security find-certificate -c "$SIGN_ID" "$SIGN_KC" >/dev/null 2>&1; then
         codesign --force --keychain "$SIGN_KC" --sign "$SIGN_ID" "$APP_PATH" >/dev/null 2>&1
     else

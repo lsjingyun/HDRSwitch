@@ -20,7 +20,7 @@ A tiny macOS menu bar utility: **one-click HDR for your external display**. It s
 
 ## Download
 
-**[HDRSwitch-1.0.8.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.8.dmg)** · 1.2 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.0.9.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.9.dmg)** · 1.2 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
 
 Open the dmg and drag `HDRSwitch.app` into Applications. It is signed locally with a self-signed certificate and notarised by nobody, so the first launch gets blocked once: **hold Control, click it, then Open**.
 
@@ -34,7 +34,7 @@ Only the Xcode command line tools are needed:
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app, double-click to run
-./package.sh    # → build/HDRSwitch-1.0.8.dmg, distributable
+./package.sh    # → build/HDRSwitch-1.0.9.dmg, distributable
 ```
 
 The complete end-user guide: **<https://lsjingyun.github.io/HDRSwitch/>** (that is [`docs/index.html`](docs/index.html) — a single file with no external dependencies, also shipped inside the DMG, ⌘P saves it as PDF).
@@ -73,6 +73,7 @@ Measured timeline (IINA, a HEVC 10-bit PQ source):
 | --- | --- |
 | File opened | Within 1–2 s it identifies `hvc1 · PQ · BT.2020` |
 | +3–4 s | Switches to 5K@60Hz and enables HDR; headroom goes from 1.0 to 2.18 (confirming real HDR output) |
+| Video closed | Handle disappears → 4 s grace → falls back, about 5 s in practice (pausing keeps HDR) |
 | Player quits | A 30 s grace period starts (so pausing or skipping an episode doesn't bounce the display) |
 | +30 s | HDR off, 144 Hz restored |
 
@@ -126,7 +127,13 @@ That last point matters: **having a file open is not the same as playing it**. A
 
 **The one exception is "paused"**: IINA and VLC drop their "playing video" power assertion the moment you hit pause, and if you then switch to another app the old logic read that as "playback finished" — the grace period expired and the picture lost HDR mid-movie. Now a player that **still has the source file open** counts as present, no matter how long you stay paused; HDR only falls back once the file is unloaded or the player quits. To avoid mistaking encoders and transcoders for players, this only applies to whitelisted players and to apps that were genuinely playing that same file moments ago. It can be turned off in the menu (on by default).
 
-One class of app must be excluded entirely: **downloaders**. qBittorrent, Transmission, Thunder, Motrix and Folx hold `.mkv` handles for hours on end — while downloading, while seeding — but they never play anything. Without the exclusion, the moment an HDR torrent starts downloading the display jumps to HDR. They are now removed from the candidate list by bundle id plus name matching, and there is a second net for clients that aren't recognised: **a file that is growing, or was modified within the last 4 seconds, does not count as playback**. `HDRSwitch why` prints an extra "ignored downloaders" line so you can confirm the filter fired.
+**"Paused" and "stopped" are told apart by handles, not by window size.** While paused the file stays open and only the timeline stops; when you stop the video the player hands the file back and the handle disappears. So the rule is: this session has seen a handle, and now all of them are gone → note the moment, wait a **4-second grace** (absorbing buffering, episode changes and `smbd` teardown) and treat it as finished if nothing came back. Measured: HDR falls back about 5 seconds after you close the video. Conversely, if the handle has switched to a **different file**, playback is continuing (next episode, manual source change) — it is re-registered immediately, no grace needed.
+
+This used to key off window area, which fails on Infuse: after you close a video it still leaves a `500×500` window behind, **identical in shape** to the mini-player it collapses into when paused. Geometry cannot tell them apart — hence several releases that either dropped out of HDR at random or never dropped at all. Window size is now only a hint.
+
+There is one hard rule on top: **once a session has been judged finished, its old verdict can never be revived**. HDR may only switch on again after playback genuinely resumes (a live handle is registered again). Previously a flickering window size made the verdict oscillate between "changed" and "unchanged"; every "changed" ended the session and dropped HDR, and the next tick brought the same old verdict back as "paused" and switched it on again — the display visibly flip-flopped on its own. Also, **a paused session may only keep HDR, never turn it on**: switching while paused costs a blackout and gains nothing.
+
+ One class of app must be excluded entirely: **downloaders**. qBittorrent, Transmission, Thunder, Motrix and Folx hold `.mkv` handles for hours on end — while downloading, while seeding — but they never play anything. Without the exclusion, the moment an HDR torrent starts downloading the display jumps to HDR. They are now removed from the candidate list by bundle id plus name matching, and there is a second net for clients that aren't recognised: **a file that is growing, or was modified within the last 4 seconds, does not count as playback**. `HDRSwitch why` prints an extra "ignored downloaders" line so you can confirm the filter fired.
 
 ### Native streaming clients (Tencent Video)
 

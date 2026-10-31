@@ -1839,6 +1839,13 @@ enum WindowProbe {
     private static var sizeBaseline: [String: Set<String>] = [:]
     /// 最后一次「确定已关闭」的时间。上层据此把回落宽限压到很短。
     private static var closedAt: Date?
+    /// 最后一次「缩成小窗」的时间，只用来给日志去重。
+    private static var shrankAt: Date?
+
+    /// 判「退回媒体库」时，新窗口还得多大才算数（平方点）。
+    /// 媒体库窗口是正常大小的窗口，怎么也有 1000×600 以上；迷你播放器只有
+    /// 几百点见方（Infuse 实测 500×500 = 250000）。取 700000 把两者分开。
+    private static let goneFloorArea = 700_000
 
     static func closedRecently(_ within: TimeInterval = 20) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -1905,8 +1912,27 @@ enum WindowProbe {
             let ratio = Double(n) / Double(b)
             // 播放画面通常占满大半屏，退回媒体库只剩一个小窗 —— 面积差一个量级。
             // 阈值取 0.35：拖一下窗口、切全屏都不会误伤，退回媒体库一定命中。
-            if ratio <= 0.35 {
+            //
+            // 但「变小」不等于「关了」。播放器失焦时常常缩成**迷你播放器**：
+            // Infuse 实测从 2501632 缩到 250000 平方点，正好 9%，面积特征和
+            // 「退回媒体库」一模一样，只看比例必然误判 —— 用户看到的现象就是
+            // 「暂停后切个 App，HDR 就被收走了」。
+            // 两者的区别在**新窗口本身还有多大**：媒体库仍是个正常大小的窗口，
+            // 迷你播放器只有几百点见方。所以只有「换成另一个正常大小的窗口」
+            // 才认作关片；小窗一律当「播放器还在，只是变小了」。
+            if ratio <= 0.35, n >= goneFloorArea {
                 return markGone("最大窗口 \(b) → \(n) 平方点（只剩 \(Int(ratio * 100))%）")
+            }
+            if ratio <= 0.35 {
+                lock.lock()
+                let repeated = shrankAt.map { Date().timeIntervalSince($0) < 60 } ?? false
+                shrankAt = Date()
+                lock.unlock()
+                if !repeated {
+                    Log.write("界面缩成小窗（最大窗口 \(b) → \(n) 平方点）· 当迷你播放器，不算关片",
+                              force: true)
+                }
+                return .same
             }
             if ratio < 0.85 {
                 Log.write("界面可能变了（最大窗口 \(b) → \(n) 平方点）· 暂不结论", force: true)
@@ -1934,6 +1960,7 @@ enum WindowProbe {
         baseline[id] = nil
         sizeBaseline[id] = nil
         closedAt = nil
+        shrankAt = nil
         lock.unlock()
     }
 }
@@ -2161,8 +2188,22 @@ enum PlaybackWatcher {
             // 活跃度：2 = 在播，1 = 只是前台开着，0 = 后台且没在播（多半是暂停）
             let activity = (playing ? 2 : 0) + (isFront ? 1 : 0)
 
-            let mediaPaths = ProcFiles.openPaths(pid: pid).filter {
+            let openPaths = ProcFiles.openPaths(pid: pid)
+            let mediaPaths = openPaths.filter {
                 shouldCountAsMedia($0)
+            }
+            // 诊断：播放内核的中间文件被排掉时留个痕，省得以后又以为是「读不到片源」。
+            // 只记**本来会被当成视频**的那些（扩展名对得上）—— 否则每个 App 的
+            // sqlite / 日志文件都会上榜，一秒刷六行，把有用的记录挤没了。
+            if Log.enabled {
+                let junk = openPaths.filter {
+                    MediaProbe.mediaExtensions.contains(($0 as NSString).pathExtension.lowercased())
+                        && isTransientMedia($0)
+                }
+                if !junk.isEmpty {
+                    let names = junk.prefix(3).map { ($0 as NSString).lastPathComponent }
+                    Log.write("  \(name): 忽略临时片源文件 \(junk.count) 个 [\(names.joined(separator: ", "))]")
+                }
             }
 
             // 进程自己没有句柄时，片源可能由本机 smbd 代持 —— Infuse 走共享播放
@@ -2186,7 +2227,16 @@ enum PlaybackWatcher {
 
             // 刚确认「真的在播」的片源记一笔：暂停时靠它确认「还是那个片子」
             if playing {
+                // 真的播起来了 → 上一场「已结束」的记号作废（哪怕这一轮没读到片源）
+                clearEnded(appID)
                 markLive(appID, paths: mediaPaths + smbPaths)
+                // 同时记下「这个 App 会往系统「正在播放」里注册内容」——
+                // 之后关片时那份注册会被清空，正好拿来区分「暂停」和「关了」。
+                if MediaRemote.hasContent(),
+                   let owner = MediaRemote.contentBundleID(),
+                   owner.caseInsensitiveCompare(appID) == .orderedSame {
+                    noteRegisteredContent(appID)
+                }
                 // 顺带记下播放界面：之后界面一换（退回媒体库 / 关掉片子）
                 // 就是「停止播放」而不是「暂停」，可以立刻回落。
                 if item.kind == .player { WindowProbe.remember(pid: pid, id: appID) }
@@ -2315,24 +2365,104 @@ enum PlaybackWatcher {
                 guard keepPaused, item.kind == .player, let playedAt = liveAt(appID)
                 else { continue }
 
+                // 这一场已经判过结束了：不再拿旧判定当「暂停」复活。
+                // 真的重新播起来会走 markLive 把这个记号清掉。
+                guard !endedRecently(appID) else { continue }
+
                 // 播放界面已经换掉了（退回媒体库 / 关掉片子 / 播放窗口没了）：
                 // 这是「停止播放」，不是「暂停」。以前只按时间硬撑，于是片子关掉
                 // 之后 HDR 还挂着，非得把播放器整个退掉才回落。
                 let ui = WindowProbe.interfaceChanged(pid: pid, id: appID)
-                if ui == .gone { continue }
+                if ui == .gone {
+                    noteEnded(appID)
+                    continue
+                }
                 // 界面还在 → 真暂停，可以长时间保持；读不到界面（没有屏幕录制
                 // 权限 / 播放器不设窗口标题）就只能按时间兜，别兜太久。
-                let limit: TimeInterval = ui == .same ? pausedMaxAge : pausedSoftAge
+                //
+                // 三种情况分开算：
+                //   .same    窗口还是那一块（含缩成迷你播放器）→ 暂停，保持
+                //   .altered 窗口明显变小但没小到「媒体库」那份上 —— 多半是退回
+                //            媒体库途中/小窗媒体库。给 20 秒确认，不立刻回落
+                //   nil      完全读不到 → 按 8 分钟兜底
+                let limit: TimeInterval
+                switch ui {
+                case .same?: limit = pausedMaxAge
+                case .altered?: limit = alteredSoftAge
+                case .gone?, nil: limit = pausedSoftAge
+                }
                 guard Date().timeIntervalSince(playedAt) < limit else { continue }
 
                 let openPaths = mediaPaths.isEmpty ? smbPaths : mediaPaths
                 if !wasPlaying(appID, paths: openPaths) {
-                    // 本机完全看不到的片源（Infuse 播网络 / 远程共享）：既没有句柄，
-                    // smbd 也未必一直开着。看系统的「正在播放」里还有没有内容 ——
-                    // 暂停时它还挂着（控制中心仍显示片名和进度），停止播放才清空。
-                    guard let last = lastJudge(name) else { continue }
+                    // 句柄还在，只是换成了**另一个文件** —— 下一集 / 手动换片。
+                    // 这不是关片，按「还在播」重新记账，直接往下走正常判定。
+                    // （早先这里只比对「是不是原来那一个」，换集那几秒会被当成
+                    //  句柄消失，只好把宽限拉到十几秒来兜，回落就跟着变慢。）
+                    if !openPaths.isEmpty {
+                        markLive(appID, paths: openPaths)
+                        clearNoLive(appID)
+                        heldPaused = true
+                    } else if hasLivePaths(appID) {
+                        // 一个句柄都没有了。
+                        //
+                        // 这一场里确实见到过句柄（Infuse 播共享：句柄在 smbd 手里），
+                        // 现在全没了 —— 播放器把片源交回去了，就是真的关了。
+                        // 以前这里只拿「上一次判定」按时间续命，于是关掉片子之后
+                        // 照样算暂停，HDR 一挂就是半小时，用户看到「关了不回落」。
+                        let since = markNoLive(appID)
+                        let gone = Date().timeIntervalSince(since)
+                        guard gone > noHandleGrace else {
+                            // 宽限期内：缓冲 / smbd 收摊会抖一下，
+                            // 沿用上一次判定，别让画面跟着抖。
+                            if let last = lastJudge(name) {
+                                result.append(MediaSession(appName: name, path: last.path,
+                                                           verdict: last.verdict,
+                                                           detail: last.detail + " · 已暂停",
+                                                           kind: item.kind, evidence: last.evidence,
+                                                           activity: 0, paused: true))
+                            }
+                            continue
+                        }
+                        if Log.enabled {
+                            Log.write("  \(name): 片源句柄已消失 \(Int(gone)) 秒"
+                                      + "（界面=\(ui == .same ? "还在" : ui == .altered ? "变了" : "未知")）"
+                                      + "· 按停止播放处理")
+                        }
+                        noteEnded(appID)
+                        continue
+                    } else {
+                    // 这一场从头到尾没见过句柄（网页播放 / 纯网络串流）：
+                    // 只能看系统「正在播放」里那条还在不在 —— 暂停时它还挂着
+                    // （控制中心仍显示片名和进度），停止播放才清空。
+                    let loaded = MediaRemote.hasContent()
+                    let owner = MediaRemote.contentBundleID()
+                    let mineNow = loaded && (owner?.caseInsensitiveCompare(appID) == .orderedSame)
+                    // 只有「亲眼见过它往系统里注册过内容」才拿这条当证据，
+                    // 否则会把不支持 Now Playing 的播放器（暂停时不注册的那种）
+                    // 一律当成关片，暂停就掉色。
+                    if hasRegisteredContent(appID) && !mineNow {
+                        if Log.enabled {
+                            Log.write("  \(name): 系统「正在播放」已清空"
+                                      + "（内容=\(loaded ? (owner ?? "?") : "无")）· 按停止播放处理")
+                        }
+                        noteEnded(appID)
+                        continue
+                    }
+                    guard let last = lastJudge(name) else {
+                        noteEnded(appID)
+                        continue
+                    }
                     let age = Date().timeIntervalSince(last.at)
-                    guard age < limit else { continue }
+                    guard age < limit else {
+                        if Log.enabled {
+                            Log.write("  \(name): 暂停已超时（\(Int(age))s > \(Int(limit))s"
+                                      + "，界面=\(ui == .same ? "还在" : ui == .altered ? "变了" : "未知")"
+                                      + "）· 按停止播放处理")
+                        }
+                        noteEnded(appID)
+                        continue
+                    }
                     result.append(MediaSession(appName: name, path: last.path,
                                                verdict: last.verdict,
                                                detail: last.detail + " · 已暂停"
@@ -2340,8 +2470,10 @@ enum PlaybackWatcher {
                                                kind: item.kind, evidence: last.evidence,
                                                activity: 0, paused: true))
                     continue
+                    }
                 }
                 // 句柄还对得上 → 是暂停，继续往下判定（activity = 0，详情会标「已暂停」）
+                clearNoLive(appID)
                 heldPaused = true
             }
 
@@ -2400,6 +2532,10 @@ enum PlaybackWatcher {
                                                detail: last.detail + " · 本轮未读到片源，沿用",
                                                kind: item.kind, evidence: last.evidence,
                                                activity: activity))
+                    // 续时间戳：整部片子都读不到句柄时（Infuse 播 DV 全程只留临时文件），
+                    // 不续就会在开场 30 分钟后「沿用」到期，看一半忽然掉色。
+                    // 这里只在「确实在播」时续，停止播放不会走到这一段。
+                    touchJudge(name)
                     continue
                 }
                 var verdict = HDRVerdict.unknown
@@ -2464,6 +2600,11 @@ enum PlaybackWatcher {
     /// 还要挂很久（用户之前抱怨「非得退出整个 App 才回落」）。8 分钟是个折中 ——
     /// 授权屏幕录制后这条基本用不上了，界面一变就立刻回落。
     private static let pausedSoftAge: TimeInterval = 8 * 60
+
+    /// 暂停中「界面明显变小但还没小到媒体库那份上」时的确认期。
+    /// 这一类基本是「正在退回媒体库」或者用了小窗媒体库 —— 片子已经关了，
+    /// 但不该在第一帧就断定。20 秒足够看清，也不至于让用户等半分钟还亮着。
+    private static let alteredSoftAge: TimeInterval = 20
 
     /// 网页探测「暂时读不到」时还沿用上次判定多久。
     ///
@@ -2533,6 +2674,8 @@ enum PlaybackWatcher {
         defer { liveLock.unlock() }
         livePaths[id] = Set(paths)
         liveSeenAt[id] = Date()
+        // 又真的播起来了：上一场「已结束」的记号作废。
+        endedAt[id] = nil
         if livePaths.count > 64 {
             let now = Date()
             for (k, t) in liveSeenAt where now.timeIntervalSince(t) > 6 * 3600 {
@@ -2548,6 +2691,98 @@ enum PlaybackWatcher {
         liveLock.lock()
         defer { liveLock.unlock() }
         return liveSeenAt[id]
+    }
+
+    /// 哪些 App 会把自己注册进系统「正在播放」（播放时观察到的）。
+    /// 只对这类 App 用「注册被清空」当作关片证据 —— 不支持 Now Playing 的
+    /// 播放器暂停时本来就是空的，拿它当证据会让暂停也掉色。
+    private static var registeredContent: Set<String> = []
+
+    /// 判定「这一场播放已经结束」的时刻。
+    ///
+    /// 记这个是因为：判完结束之后，上一场的判定还留在 judgeByName 里，
+    /// 而「暂停保持」只要没有反证就会把它接着用。播放器的窗口尺寸又一直在
+    /// `.same` / `.altered` 之间抖（实测 Infuse：同一部片子，面积一会儿
+    /// 2508175、一会儿 250000），于是每一轮都在「判结束 → 回落 → 又算暂停
+    /// → 切回来」之间来回抽，用户看到的就是「明明没在播，屏幕自己切 HDR」。
+    ///
+    /// 所以一旦判过结束，就不再从旧判定复活：必须等到**真的重新在播**
+    /// （markLive 里清掉）才能再切上去。
+    private static var endedAt: [String: Date] = [:]
+
+    /// 判过一次结束之后，隔多久才允许旧判定重新被当作「暂停」。
+    /// 这么长是因为：真正的重新播放一定会走 markLive 把记号清掉，
+    /// 这个时限只影响「用户什么也没做」的情况。
+    private static let endedCooldown: TimeInterval = 2 * 3600
+
+    private static func noteEnded(_ id: String) {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        endedAt[id] = Date()
+    }
+
+    private static func clearEnded(_ id: String) {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        endedAt[id] = nil
+        noLiveSince[id] = nil
+    }
+
+    private static func endedRecently(_ id: String) -> Bool {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        guard let t = endedAt[id] else { return false }
+        return Date().timeIntervalSince(t) < endedCooldown
+    }
+
+    /// 从「还在播」变成「看不见句柄」的那一刻。
+    ///
+    /// 句柄是「暂停」和「关片」之间唯一靠得住的区别：暂停时片源还开着
+    /// （Infuse 走共享是 smbd 代持，播放器自己一个 fd 都没有），关片后
+    /// 播放器就把文件交回去了。缓冲、smbd 收摊会让它抖个一两秒，
+    /// 所以先记下「从什么时候开始没了」，宽限过了还没回来才算结束。
+    private static var noLiveSince: [String: Date] = [:]
+
+    /// 句柄全没了之后给多长宽限（秒）。
+    ///
+    /// 换集已经不靠它兜了（句柄换成别的文件时按「还在播」处理），
+    /// 所以这里只用来吸收缓冲、smbd 收摊那一下的抖动 —— 短一点，
+    /// 关掉片子之后屏幕就掉得干脆。实测 Infuse 关片后 4 秒足够稳。
+    private static let noHandleGrace: TimeInterval = 4
+
+    private static func markNoLive(_ id: String) -> Date {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        if let t = noLiveSince[id] { return t }
+        let now = Date()
+        noLiveSince[id] = now
+        return now
+    }
+
+    private static func clearNoLive(_ id: String) {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        noLiveSince[id] = nil
+    }
+
+    /// 这一场里有没有真的见到过片源句柄。没见过的（网页播放、纯网络串流）
+    /// 不能用「句柄没了」当结束证据 —— 那种播放器全程都没有句柄。
+    private static func hasLivePaths(_ id: String) -> Bool {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        return !(livePaths[id]?.isEmpty ?? true)
+    }
+
+    private static func noteRegisteredContent(_ id: String) {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        registeredContent.insert(id)
+    }
+
+    private static func hasRegisteredContent(_ id: String) -> Bool {
+        liveLock.lock()
+        defer { liveLock.unlock() }
+        return registeredContent.contains(id)
     }
 
     private static func wasPlaying(_ id: String, paths: [String],
@@ -2571,6 +2806,9 @@ enum PlaybackWatcher {
             liveLock.lock()
             livePaths[id] = nil
             liveSeenAt[id] = nil
+            registeredContent.remove(id)
+            endedAt[id] = nil
+            noLiveSince[id] = nil
             liveLock.unlock()
             WindowProbe.forget(id: id)
         }
@@ -2586,6 +2824,31 @@ enum PlaybackWatcher {
     private static func shouldCountAsMedia(_ path: String) -> Bool {
         guard MediaProbe.mediaExtensions.contains((path as NSString).pathExtension.lowercased())
         else { return false }
+        if isTransientMedia(path) { return false }
         return !MediaProbe.isBeingWritten(path)
+    }
+
+    /// 播放内核写到临时目录里的中间文件，不是片源本身。
+    ///
+    /// 这类文件有两个特征：名字是**光秃秃的 UUID**（`CE59E7FF-...-9D198FBC5CF7.m4v`），
+    /// 路径在 tmp / TemporaryItems / .videoChunks 里。它们没有片名可推断，
+    /// 通常也还没写完、读不出色彩标记，探出来永远是「无法判定」。
+    ///
+    /// 留在候选里的后果很具体：Infuse 播 Dolby Vision 时会边播边写这些中间文件，
+    /// **而切换显示器模式那一下刚好会重建管线、换一个新的 UUID**。于是轮到它当
+    /// 「当前片源」→ 判定变「无法判定」→ 屏幕刚亮 1 秒就被收回去。真片源（SMB 上
+    /// 那个 `...DV...mkv`）明明还开着，却被这一条顶掉了。
+    ///
+    /// 排掉它们之后：真片源还在就按真片源判；一时读不到就走「沿用上次判定」
+    /// （carryMaxAge 30 分钟），不会因为播放器内部重建而掉色。
+    private static func isTransientMedia(_ path: String) -> Bool {
+        let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        if UUID(uuidString: stem) != nil { return true }
+
+        let lower = path.lowercased()
+        for marker in ["/temporaryitems/", "/.videochunks/", "/private/var/folders/", "/tmp/"] {
+            if lower.contains(marker) { return true }
+        }
+        return false
     }
 }

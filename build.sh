@@ -25,6 +25,16 @@ cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # 授权全部重问一遍（之前反复弹「访问可移除宗卷」就是这么来的）。
 SIGN_ID="HDRSwitch Self Signed"
 SIGN_KC="$HOME/Library/Keychains/hdrswitch.keychain-db"
+# 这把钥匙串是专门给签名用的（证书是自签的，私钥只在本机）。
+# 独立钥匙串默认会自己上锁，锁住之后 codesign 报 errSecInternalComponent ——
+# 看起来像「证书丢了」，其实只是没解锁。密码固定，解锁一次就行；
+# 想换密码就改这里，并同步重建一次钥匙串。
+SIGN_PW="hdrswitch-local"
+
+if [ -f "$SIGN_KC" ]; then
+    security unlock-keychain -p "$SIGN_PW" "$SIGN_KC" 2>/dev/null || true
+fi
+
 if security find-certificate -c "$SIGN_ID" "$SIGN_KC" >/dev/null 2>&1; then
     echo "==> 签名（${SIGN_ID}）"
     codesign --force --keychain "$SIGN_KC" --sign "$SIGN_ID" "$APP"
