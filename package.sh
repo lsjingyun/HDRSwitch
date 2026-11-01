@@ -32,7 +32,7 @@ UNI_DIR="build/universal"
 UNI_BIN="$UNI_DIR/${APP_NAME}"
 rm -rf "$UNI_DIR" && mkdir -p "$UNI_DIR"
 SRCS="Sources/main.swift Sources/Detect.swift Sources/AutoHDR.swift Sources/WebProbe.swift"
-FRAMEWORKS="-framework Cocoa -framework Carbon -framework ServiceManagement -framework AVFoundation -framework CoreMedia -framework IOKit"
+FRAMEWORKS="-framework Cocoa -framework Carbon -framework ServiceManagement -framework AVFoundation -framework CoreMedia -framework IOKit -lsqlite3"
 ok_uni=1
 for ARCH in arm64 x86_64; do
     if ! swiftc -swift-version 5 -O -target "${ARCH}-apple-macos13.0" $FRAMEWORKS \

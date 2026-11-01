@@ -329,9 +329,14 @@ final class AutoHDR {
             // 压到一个 tick 的量级，既立刻回落，又不至于在探测抖动的那一轮就动。
             let hardGone = WebProbe.pageGoneRecently() || WindowProbe.closedRecently()
                 || TencentVideoProbe.stoppedRecently()
+                // B 站客户端：播放页没了、或进度表静默到点，都是**确定**的结束，
+                // 不该再等满 grace —— 用户按下返回后应该马上回落。
+                || BiliSailProbe.endedRecently()
+            // 硬证据（播放页没了 / 进度表停写）只需压一个 tick 的抖动，
+            // 不再等满宽限期 —— 用户按下返回，屏幕就该马上回落。
             let need: TimeInterval
             if hardGone {
-                need = min(grace, 0.6)
+                need = min(grace, 0.25)
             } else {
                 need = grace + ((candidate == nil && autoOnWasWeb) ? webHoldExtra : 0)
             }
@@ -380,6 +385,11 @@ final class AutoHDR {
                 // 原生流媒体（腾讯视频）：判据来自它自己的播放内核日志。
                 // 读不到时同样不主动开；已经开着就先保持 —— 收 HDR 只该由
                 // 「明确读到 SDR」或「播放结束」触发，不该由「这一轮没读到」触发。
+                if hdrOn { return .keep }
+                return streamingAsHDR ? .on : .off
+            case .biliStreaming:
+                // B 站客户端：画质来自站点公开的清晰度清单，读不到时（刚开播、
+                // 离线、接口抽风）不主动开；已经开着就先保持，等清单回来再定。
                 if hdrOn { return .keep }
                 return streamingAsHDR ? .on : .off
             case .streaming:
@@ -458,6 +468,9 @@ final class AutoHDR {
             }
             if s.kind == .appStreaming {
                 return "自动切换：\(s.appName) · 流媒体（读不到画质，不切）"
+            }
+            if s.kind == .biliStreaming {
+                return "自动切换：\(s.appName) · B 站（画质清单未回，先不切）"
             }
             return "自动切换：\(s.appName) · 片源未知（\(unknownAsHDR ? "按 HDR 处理" : "不切")）"
         }

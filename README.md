@@ -16,11 +16,12 @@ macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片�
 - Infuse 播**本机 SMB 共享**时，反查 `smbd` 持有的句柄，判定和本地文件一样精确
 - 网页视频（B 站 / YouTube）让浏览器跑一小段 JS 读实测画质；YouTube「SDR 下不给 HDR 选项」的死结也解了
 - 腾讯视频这类原生流媒体客户端，读它播放内核自己写的内容级 HDR 判定（`isHDRVideo=1`）
+- B 站客户端（BiliSail）读它沙盒里的播放进度表判断在不在播，画质去问 B 站 `playurl` 接口（125 真彩 HDR / 126 杜比视界）
 - 切一次只黑一次屏，约 0.7 秒
 
 ## 下载
 
-**[HDRSwitch-1.0.9.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.9.dmg)** · 1.2 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.1.0.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.1.0.dmg)** · 1.5 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
 
 打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地自签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
 
@@ -34,7 +35,7 @@ macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连�
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app，双击即用
-./package.sh    # → build/HDRSwitch-1.0.9.dmg，可分发
+./package.sh    # → build/HDRSwitch-1.1.0.dmg，可分发
 ```
 
 面向使用者的完整说明：**<https://lsjingyun.github.io/HDRSwitch/>**（即 [`docs/index.html`](docs/index.html)，单文件、无外部依赖，DMG 里也带一份，⌘P 可存 PDF）。
@@ -163,6 +164,24 @@ SDR 内容对应 `isHDRVideo=0` / `hdr type=None`。工具读这份日志来定 
 **这条路需要「完全磁盘访问权限」。** 日志在腾讯视频自己的沙盒容器里（`~/Library/Containers/com.tencent.tenvideo/…`），别的 App 要读必须先拿到这一项，否则系统一律返回 `permission denied`——HDRSwitch 只会安静地判成「读不到画质」。菜单里有「腾讯视频识别：点击授权」，点了直接打开设置页并高亮 HDRSwitch，勾上后重启一次即可。没授权也不算坏：`HDRSwitch why` 的「腾讯视频」一节会写明「读不到 · 缺少完全磁盘访问权限」。
 
 `HDRSwitch why` 里有一节「腾讯视频」，直接列出当前读到的内容和日志路径，排查时不用猜。
+
+### B 站客户端（BiliSail）
+
+B 站没有官方 Mac 客户端，第三方里用得多的是 **BiliSail**（Flutter + libmpv）。它也是沙盒 App，进程里没有可读的媒体句柄，但容器里有一张播放进度表：
+
+```text
+~/Library/Containers/dev.bilisail.bilisail/Data/Library/Application Support/
+  dev.bilisail.bilisail/bilisail.sqlite
+  └── playback_progress：bvid / cid / title / position_ms / duration_ms / updated_at_ms
+```
+
+**在不在播，主要看窗口，不看这张表。** 窗口化播放是两个窗口（播放器 + 主窗口），全屏时只有一个但铺满屏幕，暂停缩成迷你播放器时仍是两个（`81×96` 那种也算）。**关掉播放后窗口并不销毁**，只是留着几个 offscreen 的壳（4 个 `2560×30` 的标题栏 + 1 个 `64×64` 小窗），数量一直 ≥2——按窗口总数判断就会把「关掉了」永远当成「暂停」，这就是「关掉不回落」。所以只数**此刻真的在屏幕上**的窗口（layer 0、≥40×40）：一个 `1120×828` 的列表窗（约屏 25%）是关掉了，一个 `81×96` 的迷你窗（0.2%）是暂停，5% 这条线分得很开。
+
+进度表本身分不开暂停和关闭——播放时 5 秒写一次，**暂停时几乎不写**（实测暂停 20 秒只有一次心跳），所以它只在「拿不到窗口信息」时兜底。
+
+**是不是 HDR 片源，去问接口。** 本地库里没有画质字段，拿 `bvid`/`cid` 请求 B 站 `playurl`（`qn=126&fnval=4048&fourk=1`，要带 `Referer`），看 `accept_quality` 里有没有 **125（真彩 HDR）** 或 **126（杜比视界）**。接口没回来之前先用标题里的字样顶一下，拉到了再更新，结果按 `bvid/cid` 缓存 6 小时。
+
+进度表也在沙盒里，读它要的是同一项「完全磁盘访问权限」，授过腾讯视频就不用再授。`HDRSwitch why` 有一节「BiliSail（B 站客户端）」，会写明是「读不到 · 缺少完全磁盘访问权限」还是现场判定。
 
 ### 浏览器 / 网页视频
 
@@ -294,20 +313,22 @@ macOS 没有公开的 HDR 开关 API，本工具通过 `dlopen` 调用 SkyLight 
 
 ## 图标
 
-图标是代码画的，没有图片素材：`Tools/makeicon.swift` 用 CoreGraphics 在 2048 画布上绘制再缩到 1024，改配色/比例直接改脚本里的数值，重新生成即可。
+现在的图标是深色背板上一枚**暖金色发光的开关**。它从一张 1168×1198 的截图生成，脚本是 `Tools/makeicon-toggle.swift`：
 
 ```bash
-swift Tools/makeicon.swift build/icon/AppIcon-1024.png
+swift Tools/makeicon-toggle.swift 源图.jpg build/icon/AppIcon-1024.png
 ```
 
-**设计**：深色背板上放一颗 45° 斜切的球——左下没入暗部，右上半被强光照亮，交界处一道高光线，外围一圈光晕。HDR 的本质就是「同一画面里既有极暗又有极亮」，一颗球就够表达；不用字母、不用文字，缩到 32px 仍认得出。
+脚本做三件事：按暗部包围盒把圆角矩形居中裁成正方形 → **铺满** 1024 画布 → 用超椭圆（指数 5）遮罩把四角的白底与投影切掉。整套尺寸用 `sips` 缩出来、`iconutil` 打成 icns。
 
 **两个踩过的坑**：
 
-- ⚠️ **必须满幅输出**。macOS 26/27 的图标规范是图形铺满整张画布、圆角由系统裁。早先按旧规范留了 100px 透明边距，系统把透明区当空白、额外套了一层白色玻璃底板，图标变成「白框里塞一块深色」。改成满幅后正常。
-- 外围光晕要用**叠加混合**（`plusLighter`）而不是普通透明——普通 alpha 会把深色背板染成脏褐色；叠加才是「光加在暗底上」，暗的地方仍然暗。另外溢光只加在亮面一侧，暗面沾到就糊成灰雾。
+- ⚠️ **必须满幅输出**。macOS 26/27 的图标规范是图形铺满整张画布、圆角由系统裁。按旧规范留 100px 透明边距的话，系统把透明区当空白、额外套一层白色玻璃底板，图标变成「白框里塞一块深色」——在深色 Dock 上尤其明显。判断标准很简单：`NSWorkspace.icon(forFile:)` 渲染出来，画布边缘应当直接是深色本体，而不是浅色底板。
+- ⚠️ **边缘要向内削 3px**。源图边缘那圈抗锯齿像素是和白底混出来的，不切掉会在深色背景上留一道浅色描边。遮罩比画布内缩 3px、再羽化 1.5px 就够了。
 
-打包进 app 的流程已经写进 `build.sh`（`Resources/AppIcon.icns` → `Contents/Resources/`），Info.plist 里的 `CFBundleIconFile` 指向 `AppIcon`。整套尺寸用 `sips` 从 1024 缩出来、`iconutil` 打成 icns。
+另外还留着最早那版图标：深色背板上一颗 45° 斜切的球（「同一画面里既有极暗又有极亮」）。它是纯代码画的，`Tools/makeicon.swift` 在 2048 画布上绘制再缩到 1024，想换回去随时可以。**画光晕要用叠加混合**（`plusLighter`）而不是普通透明——普通 alpha 会把深色背板染成脏褐色。
+
+打包进 app 的流程已经写进 `build.sh`（`Resources/AppIcon.icns` → `Contents/Resources/`），Info.plist 里的 `CFBundleIconFile` 指向 `AppIcon`。
 
 ## 打包成 DMG
 

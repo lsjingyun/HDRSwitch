@@ -9,6 +9,7 @@ import AppKit
 import AVFoundation
 import CoreMedia
 import IOKit.pwr_mgt
+import SQLite3
 
 // MARK: - 读取进程打开的文件
 
@@ -351,6 +352,7 @@ enum Evidence {
     case filenameHint   // 文件名里的 HDR 字样
     case webProbe       // 回网页里读到的清晰度标签 / 播放器色彩信息
     case appLog         // 播放器自己写进日志的内容级 HDR 判定（腾讯视频）
+    case siteQuality    // 站点的画质清单（B 站客户端：该视频支持哪些清晰度）
     case none           // 无从判断（网页流、网络串流）
 
     var label: String {
@@ -359,6 +361,7 @@ enum Evidence {
         case .filenameHint: return "文件名推断"
         case .webProbe: return "网页实测"
         case .appLog: return "播放器日志"
+        case .siteQuality: return "站点画质清单"
         case .none: return "无法判定"
         }
     }
@@ -1965,6 +1968,472 @@ enum WindowProbe {
     }
 }
 
+// MARK: - BiliSail（B 站第三方客户端）在播内容的画质
+
+/// BiliSail 是 Flutter + media_kit（libmpv）写的客户端。它把「播放状态」留在了
+/// 自己的沙盒里，但没有留画质 —— 三条常规路它都走不通：
+///
+///   · 没有本地文件句柄：数据直接从网络流进 mpv
+///   · 不是网页：flutter_inappwebview 只用来登录，播放走原生
+///   · 不注册系统「正在播放」：实测播放时 MediaRemote 里始终是空的
+///
+/// 能用的是它的播放进度表：
+///   ~/Library/Containers/dev.bilisail.bilisail/Data/Library/Application Support/
+///   dev.bilisail.bilisail/bilisail.sqlite → playback_progress
+///
+/// 实测行为（2026-11-01 每秒采样一次）：
+///   · 播放中：position_ms 每 5 秒 +5005，同一行被反复写
+///   · 暂停：position 不动，但仍有心跳写入（约 15 秒一次）
+///   · 关掉播放：写一次最终位置，之后**完全不再写**
+///
+/// 所以判据是两件事：位置在走 = 在播；行还在刷新但位置不动 = 暂停；
+/// 行不再刷新 = 这一场结束了。
+///
+/// 画质本地查不到，改为问 B 站自己的公开接口（`/x/player/playurl`，匿名可读）：
+/// 它返回这个视频**支持**的清晰度列表，含 125（真彩 HDR）/ 126（杜比视界）
+/// 就是 HDR 片源。每条视频只拉一次，之后走缓存；拉不到就退到标题里的 HDR 字样。
+enum BiliSailProbe {
+    static let bundleID = "dev.bilisail.bilisail"
+
+    static let dbPath = NSHomeDirectory()
+        + "/Library/Containers/dev.bilisail.bilisail/Data/Library/Application Support"
+        + "/dev.bilisail.bilisail/bilisail.sqlite"
+
+    static func canRead() -> Bool {
+        (try? FileManager.default.attributesOfItem(atPath: dbPath)) != nil
+    }
+
+    /// 进度表还「活着」多久算一场会话 —— 只在「看不到播放窗口」时才会用到。
+    /// 播放时 5 秒一写，但**暂停时基本不写**（实测暂停 20 秒只有一次心跳），
+    /// 所以它分不开「暂停」和「关闭」，只能当没有窗口信息时的兜底。
+    private static let aliveWindow: TimeInterval = 20
+    /// 位置在这么久之内动过 → 在播
+    private static let advanceWindow: TimeInterval = 8
+    /// 位置往前走了这么多才算「在走」（毫秒），防抖
+    private static let advanceStep: Double = 400
+    /// 播放窗口消失后等这么久才认「关掉了」。
+    ///
+    /// 只留一个轮询周期（tick 实测 0.5~0.9 秒，故取 0.45）：短到用户一按返回、
+    /// 下一拍就判完，长到足够挡掉「窗口重建那一瞬」的抖动（关全屏、换播放器内核
+    /// 除外 —— 那些时候位置还在走，根本走不到这条判据）。早先的 3 秒纯属保险，
+    /// 用户感受到的就是「关掉之后还赖了好几秒才回落」。
+    private static let windowGoneGrace: TimeInterval = 0.45
+    /// 兜底：进度表静默这么久就认「这一场结束了」。
+    /// 暂停时它仍在写心跳（实测 ≤20 秒一次），所以 2 分钟全静音只可能是关掉了。
+    private static let quietMax: TimeInterval = 180
+    /// 暂停上限：播放窗口一直开着，也不能永远占着 HDR
+    private static let pausedMaxAge: TimeInterval = 30 * 60
+
+    struct State {
+        let playing: Bool
+        let verdict: HDRVerdict
+        let detail: String
+        let evidence: Evidence
+        let title: String
+        let position: Double
+        let duration: Double
+    }
+
+    private struct Row {
+        let bvid: String
+        let cid: String
+        let title: String
+        let part: String
+        let posMs: Double
+        let durMs: Double
+        let updatedAt: Date
+        var key: String { bvid + "/" + cid }
+    }
+
+    private static func latestRow() -> Row? {
+        var db: OpaquePointer?
+        // 只读打开：绝不去动别人的库
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_close(db) }
+        let sql = "select bvid, cid, title, part_title, position_ms, duration_ms, updated_at_ms"
+            + " from playback_progress order by updated_at_ms desc limit 1;"
+        var st: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(st) }
+        guard sqlite3_step(st) == SQLITE_ROW else { return nil }
+        func text(_ i: Int32) -> String {
+            guard let c = sqlite3_column_text(st, i) else { return "" }
+            return String(cString: c)
+        }
+        return Row(bvid: text(0), cid: text(1), title: text(2), part: text(3),
+                   posMs: Double(sqlite3_column_int64(st, 4)),
+                   durMs: Double(sqlite3_column_int64(st, 5)),
+                   updatedAt: Date(timeIntervalSince1970: Double(sqlite3_column_int64(st, 6)) / 1000))
+    }
+
+    // MARK: 状态
+
+    private static let stateLock = NSLock()
+    private static var lastKey = ""
+    private static var lastPos: Double = -1
+    private static var advanceAt: Date?
+    /// 这一场里见过「播放页」没有（窗口 ≥2，或单窗口但全屏）。
+    /// 关掉播放时播放页会消失 —— 这比等进度表变陈旧快得多，也准得多。
+    private static var sawPlayerPage = false
+    private static var pageGoneSince: Date?
+    /// 最近一次判「结束」的时刻。给上层当**硬证据**用：AutoHDR 收到它就不用
+    /// 再等满 grace 那几秒，可以直接回落（"关掉了"是确定的事，不是猜的）。
+    private static var endedAt: Date?
+
+    /// 刚刚确定地判过「这一场结束了」吗？
+    static func endedRecently(_ within: TimeInterval = 4) -> Bool {
+        stateLock.lock()
+        let at = endedAt
+        stateLock.unlock()
+        guard let at else { return false }
+        return Date().timeIntervalSince(at) < within
+    }
+
+    /// 读一次现场。返回 nil 表示「没在播」（这一轮不该有它的会话）。
+    ///
+    /// 判定顺序（都是实测出来的，别轻易换）：
+    ///   1. 位置在走 = 在播。这一条最硬，**优先于窗口判断** —— 全屏播放时
+    ///      它只有一个窗口，按窗口数判断会把全屏当成「关掉了」。
+    ///   2. 位置不动时看播放页还在不在：窗口 ≥2（播放器 + 主窗口，迷你播放器
+    ///      也算），或者只剩一个但铺满屏幕（全屏播放页）。
+    ///   3. 播放页没了 → 宽限 3 秒 → 结束。这是「关掉播放」的唯一信号，
+    ///      进度表分不出来（暂停时它也不写）。
+    static func poll(pid: Int32) -> State? {
+        guard let row = latestRow() else { return nil }
+        let now = Date()
+
+        stateLock.lock()
+        if row.key != lastKey || row.posMs < lastPos - 1000 {
+            // 换了一条视频、或者同一条从头重播（位置跳回去了）：从头记
+            lastKey = row.key
+            lastPos = row.posMs
+            advanceAt = now
+            sawPlayerPage = false
+            pageGoneSince = nil
+            endedAt = nil
+        } else if row.posMs > lastPos + advanceStep {
+            advanceAt = now
+            lastPos = row.posMs
+        } else {
+            lastPos = row.posMs
+        }
+        let advanced = advanceAt
+        stateLock.unlock()
+
+        let moving = advanced.map { now.timeIntervalSince($0) < advanceWindow } ?? true
+
+        // 播放页在不在？这一步要放在「位置在走」前面 —— 标题比进度表快得多。
+        //
+        // 窗口化播放是两个窗口（播放器 + 主窗口），暂停缩成迷你播放器时还是两个
+        // （所以不能按尺寸筛，否则迷你播放器会被滤掉 —— 那正是「暂停就回落」的原因）；
+        // 全屏播放只有一个窗口，但铺满屏幕；关掉播放后只剩列表页那个普通窗口。
+        //
+        // 只数「此刻真的在屏幕上」的窗口 —— BiliSail 关掉播放后并不销毁播放器，
+        // 它只是留了几个 offscreen 的壳（2560×30 的标题栏、64×64 的迷你壳），
+        // 数量一直 ≥2。按总数判断就会把「关掉」永远当成「暂停」（关掉不回落）。
+        //
+        // 更要紧的是标题：BiliSail 的播放窗口标题是「BiliSail 播放」，列表页只叫
+        // 「BiliSail」。进度表 5 秒才写一次，关掉后也要等「位置在走」那条 8 秒的
+        // 窗口过期才看得出来 —— 用户点完返回要愣 8 秒，就是这么来的。
+        // 标题是实时刷新的，读得到就以它为准，立刻判完。
+        let stats = windowStats(pid: pid)
+        let namedPlayer = stats.names.contains { $0.contains("播放") }
+        let namesComplete = !stats.names.isEmpty && !stats.names.contains { $0.isEmpty }
+        // 播放页此刻是否**看得见**（在屏）。窗口数量/尺寸只能回答这个问题。
+        let pageOnScreen: Bool
+        if stats.count >= 2 || stats.fullscreen {
+            pageOnScreen = true
+        } else if stats.count == 1 {
+            // 只剩一个小窗（迷你播放器 81×96 ≈ 0.2% 屏）是暂停/画中画，不能当关掉；
+            // 只剩一个**大**窗（列表页 1120×828 ≈ 25% 屏）才是关掉了。5% 这条线分得很开。
+            pageOnScreen = stats.bigRatio < 0.05
+        } else {
+            pageOnScreen = false
+        }
+
+        // 「播放页还在」比「看得见」宽一档：全屏播放的 BiliSail 拥有自己的桌面，
+        // Cmd+Tab 到别的 App 就是离开了那个桌面 —— 播放器窗口随之变成「不在屏」，
+        // 系统只把残留的列表窗或 81×96 的小窗报成在屏。于是「全屏暂停 + 切到别的软件」
+        // 在窗口层面和「关掉播放」长得一模一样，这就是那次回落的原因。
+        // 全屏播放器的窗口是 2560×1440（约满屏），哪怕它不在屏也算播放页还在。
+        // 关掉播放后这个窗口会被销毁（实测：全新启动、没播过视频时它根本不存在）。
+        let pageOpen: Bool
+        if namedPlayer {
+            pageOpen = true
+        } else if namesComplete {
+            // 标题全都读到了，偏偏没有「播放」那个 —— 播放页确实没了
+            pageOpen = false
+        } else {
+            pageOpen = pageOnScreen || stats.anyFullscreen
+        }
+
+        // App 是不是在前台。「关掉播放」只可能发生在用户正看着它的时候
+        // （要按返回、点关闭），后台出现的「看不见播放页」一律不当作关掉。
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let appFront = (front == bundleID)
+
+        // 后台的「看不见播放页」不算关掉 —— 见上面那条注释。
+        // 但只影响「算不算还在播」，不影响下面的兜底计时（quietMax 仍按看得见与否算）。
+        let pageAlive = pageOpen || !appFront
+
+        // 一、位置在走 且 播放页还在 —— 在播。全屏、迷你、窗口化都一样。
+        // 「页面没了」是硬事实，哪怕位置刚动过（关掉播放时最后一笔位置就是这么写的）
+        // 也不再算在播，直接往下走结束流程。
+        if moving && pageAlive {
+            stateLock.lock()
+            sawPlayerPage = true
+            pageGoneSince = nil
+            stateLock.unlock()
+            let (verdict, detail) = verdictFor(row)
+            return State(playing: true, verdict: verdict, detail: detail,
+                         evidence: cachedEvidence(row), title: row.title,
+                         position: row.posMs / 1000, duration: row.durMs / 1000)
+        }
+
+        // 二、位置不动（或播放页没了）：走页面判定
+        stateLock.lock()
+        var endNow = false
+        if pageAlive {
+            sawPlayerPage = true
+            pageGoneSince = nil
+        } else if sawPlayerPage {
+            if pageGoneSince == nil { pageGoneSince = now }
+            if now.timeIntervalSince(pageGoneSince!) >= windowGoneGrace { endNow = true }
+        }
+        let hadPage = sawPlayerPage
+        let gone = pageGoneSince
+        stateLock.unlock()
+
+        let titleTag = stats.names.isEmpty ? ""
+            : " · 标题 " + stats.names.joined(separator: "/")
+        let bgTag = (!appFront && !pageOpen) ? " · App 在后台，不算关掉" : ""
+        if endNow {
+            note("播放页消失满 \(String(format: "%.1f", windowGoneGrace)) 秒 → 按结束处理"
+                 + "（在屏窗口 \(stats.count) 个：\(stats.sig)，铺满=\(stats.fullscreen)\(titleTag)）")
+            markEnded()
+            return nil
+        }
+        if pageAlive {
+            note("暂停保持 · 在屏窗口 \(stats.count) 个：\(stats.sig)"
+                 + "\(stats.fullscreen ? "·铺满屏幕" : "")"
+                 + "\(stats.anyFullscreen && !pageOnScreen ? "·全屏播放器在别的桌面" : "")\(bgTag)\(titleTag)")
+        } else if let gone {
+            note("播放页不见了 · 还剩 \(String(format: "%.1f", windowGoneGrace - now.timeIntervalSince(gone))) 秒宽限"
+                 + "（在屏窗口 \(stats.count) 个：\(stats.sig)\(bgTag)）")
+        }
+
+        // 二·五、兜底：连播放器窗口都没有了、进度表也静默太久 —— 一定不是「暂停」了。
+        // 窗口判据万一又失准（B 站界面改版），这一条也不会让 HDR 永远挂着。
+        //
+        // 注意判的是 pageOpen 而不是「看不看得见」：全屏播放器切到别的桌面后看不见，
+        // 但窗口还在，那属于「暂停保持」，由下面的暂停上限（30 分钟）兜底 ——
+        // 不能因为「看不见」就把长时间暂停的 HDR 掉掉。
+        // 关掉播放时播放器窗口会被销毁（实测：关掉后只剩 4 个 2560×30 的壳），
+        // 所以这一条不会影响正常的「关掉就回落」。
+        let quiet = now.timeIntervalSince(row.updatedAt)
+        if !pageOpen && quiet >= quietMax {
+            note("进度表静默 \(Int(quiet)) 秒且没有播放器窗口 → 按结束处理")
+            markEnded()
+            return nil
+        }
+
+        // 三、从没看到过播放页（比如启动时界面形态不认识）：退回到「进度表还写不写」。
+        // 这一条只当兜底 —— 暂停时进度表基本不写，拿它当主判据会让暂停掉色。
+        if !hadPage && quiet >= aliveWindow { markEnded(); return nil }
+
+        // 四、暂停上限：播放页一直开着也不能永远占着 HDR
+        if let a = advanced, now.timeIntervalSince(a) > pausedMaxAge { markEnded(); return nil }
+
+        let (verdict, detail) = verdictFor(row)
+        return State(playing: false, verdict: verdict, detail: detail,
+                     evidence: cachedEvidence(row), title: row.title,
+                     position: row.posMs / 1000, duration: row.durMs / 1000)
+    }
+
+    /// 这个 App 的窗口情况：**在屏**窗口数量、最大那个是否铺满屏幕、它们的标题，
+    /// 以及「全部窗口里有没有一个满屏大小的」（anyFullscreen）。
+    ///
+    /// 不按尺寸筛窗口：暂停时窗口会缩成 81×91 的迷你播放器，尺寸一筛就没了。
+    /// 但要按「在屏」筛：关掉播放后 BiliSail 会留一堆 offscreen 的壳窗口
+    /// （2560×30 标题栏、64×64 迷你壳），把它们的数量算进去就永远判不出「关掉了」。
+    /// 真拿不到 onscreen 字段时（列表里一个在屏的都没有），退回按全部窗口算，
+    /// 免得字段缺失导致所有窗口都被滤掉、反而一关就回落。
+    ///
+    /// 标题是最快的信号：BiliSail 给播放窗口起的标题是「BiliSail 播放」，
+    /// 列表页只叫「BiliSail」。读得到标题就不必再等进度表那 8 秒。
+    /// （读标题要「屏幕录制」权限，没权限时这一项会是空的，自然退回按数量判。）
+    ///
+    /// anyFullscreen 单独算，而且**不管在不在屏**：全屏播放器在切到别的 App 之后
+    /// 只是「不在屏」，窗口还在（2560×1440）。它存在就说明播放页还开着 ——
+    /// 这是「全屏暂停 + 切走」唯一认得出来的证据。壳窗口是 2560×30，高度差得远，
+    /// 不会被这条误收。
+    private static func windowStats(pid: Int32) -> (count: Int, fullscreen: Bool, names: [String], bigRatio: Double, sig: String, anyFullscreen: Bool) {
+        let opts: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
+            return (0, false, [], 0, "无", false)
+        }
+        var onScreen: [(CGSize, String)] = []
+        var all: [(CGSize, String)] = []
+        for w in list {
+            guard (w[kCGWindowOwnerPID as String] as? Int32) == pid,
+                  (w[kCGWindowLayer as String] as? Int) == 0,
+                  let b = w[kCGWindowBounds as String] as? [String: Any],
+                  let wd = b["Width"] as? Double, let ht = b["Height"] as? Double,
+                  wd >= 40, ht >= 40 else { continue }
+            let name = w[kCGWindowName as String] as? String ?? ""
+            let item = (CGSize(width: wd, height: ht), name)
+            all.append(item)
+            if (w[kCGWindowIsOnscreen as String] as? Bool) == true { onScreen.append(item) }
+        }
+        let pool = onScreen.isEmpty ? all : onScreen
+        let biggest = pool.map { $0.0 }.reduce(CGSize.zero) {
+            $0.width * $0.height >= $1.width * $1.height ? $0 : $1
+        }
+        let screen = CGDisplayBounds(CGMainDisplayID()).size
+        let full = pool.count == 1 && screen.width > 0
+            && biggest.width >= screen.width * 0.95
+            && biggest.height >= screen.height * 0.90
+        let ratio = screen.width * screen.height > 0
+            ? Double(biggest.width * biggest.height / (screen.width * screen.height)) : 0
+        let sig = pool.isEmpty ? "无"
+            : pool.map { "\(Int($0.0.width))×\(Int($0.0.height))" }.joined(separator: "/")
+        // 全部窗口（含离屏）里有没有一个满屏大小的 —— 那就是全屏播放器
+        let anyFull = screen.width > 0 && all.contains {
+            $0.0.width >= screen.width * 0.95 && $0.0.height >= screen.height * 0.90
+        }
+        return (pool.count, full, pool.map { $0.1 }, ratio, sig, anyFull)
+    }
+
+    /// 只在状态变化时落盘，别把日志刷满
+    private static var lastNote = ""
+    private static func note(_ msg: String) {
+        stateLock.lock()
+        let changed = msg != lastNote
+        lastNote = msg
+        stateLock.unlock()
+        if changed { Log.write("BiliSail · " + msg, force: true) }
+    }
+
+    private static func markEnded() {
+        stateLock.lock()
+        endedAt = Date()
+        stateLock.unlock()
+    }
+
+    // MARK: 画质
+
+    private struct Cached {
+        let verdict: HDRVerdict
+        let detail: String
+        let at: Date
+    }
+
+    private static var cache: [String: Cached] = [:]
+    private static var fetching: Set<String> = []
+    private static let apiQueue = DispatchQueue(label: "com.wangjin.hdrswitch.bili", qos: .utility)
+
+    private static func verdictFor(_ row: Row) -> (HDRVerdict, String) {
+        stateLock.lock()
+        let hit = cache[row.key]
+        stateLock.unlock()
+        if let hit, Date().timeIntervalSince(hit.at) < 6 * 3600 {
+            return (hit.verdict, hit.detail)
+        }
+        // 还没拉到：先用标题里的字样顶上，同时后台去问接口
+        requestVerdict(row)
+        return titleHint(row)
+    }
+
+    private static func cachedEvidence(_ row: Row) -> Evidence {
+        stateLock.lock()
+        let hit = cache[row.key]
+        stateLock.unlock()
+        return hit == nil ? .filenameHint : .siteQuality
+    }
+
+    /// 标题里的 HDR 字样：接口没回来（或没网）时的兜底
+    private static func titleHint(_ row: Row) -> (HDRVerdict, String) {
+        let hay = (row.title + " " + row.part).uppercased()
+        for k in ["HDR", "杜比", "DOLBY", "真彩"] where hay.contains(k) {
+            return (.hdr, "标题含「\(k)」（画质清单读取中）")
+        }
+        return (.unknown, "画质清单读取中 · 标题无线索")
+    }
+
+    private static func requestVerdict(_ row: Row) {
+        let key = row.key
+        stateLock.lock()
+        if cache[key] != nil || fetching.contains(key) { stateLock.unlock(); return }
+        fetching.insert(key)
+        stateLock.unlock()
+
+        var comps = URLComponents(string: "https://api.bilibili.com/x/player/playurl")!
+        comps.queryItems = [
+            URLQueryItem(name: "bvid", value: row.bvid),
+            URLQueryItem(name: "cid", value: row.cid),
+            URLQueryItem(name: "qn", value: "126"),
+            URLQueryItem(name: "fnval", value: "4048"),
+            URLQueryItem(name: "fourk", value: "1")
+        ]
+        guard let url = comps.url else { return }
+        var req = URLRequest(url: url, timeoutInterval: 4)
+        req.setValue("https://www.bilibili.com", forHTTPHeaderField: "Referer")
+        req.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+                     + " (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+                     forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: req) { data, _, err in
+            let (verdict, detail) = parse(data, err)
+            stateLock.lock()
+            cache[key] = Cached(verdict: verdict, detail: detail, at: Date())
+            fetching.remove(key)
+            // 只留最近 60 条，免得长跑把内存吃满
+            if cache.count > 60 {
+                let old = cache.sorted { $0.value.at < $1.value.at }.prefix(cache.count - 60)
+                for (k, _) in old { cache[k] = nil }
+            }
+            stateLock.unlock()
+        }.resume()
+    }
+
+    private static func parse(_ data: Data?, _ err: Error?) -> (HDRVerdict, String) {
+        guard let data,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            let why = err?.localizedDescription ?? "返回不是 JSON"
+            return (.unknown, "B 站画质清单读取失败（\(why.prefix(30))）")
+        }
+        guard (obj["code"] as? Int) == 0, let d = obj["data"] as? [String: Any] else {
+            let code = obj["code"] as? Int ?? -1
+            return (.unknown, "B 站画质清单读取失败（code \(code)）")
+        }
+        let qs = (d["accept_quality"] as? [Int]) ?? []
+        let descs = (d["accept_description"] as? [String]) ?? []
+        func name(_ q: Int) -> String {
+            if let i = qs.firstIndex(of: q), i < descs.count { return descs[i] }
+            return "qn\(q)"
+        }
+        if qs.contains(126) { return (.hdr, "B 站画质清单：含 \(name(126))") }
+        if qs.contains(125) { return (.hdr, "B 站画质清单：含 \(name(125))") }
+        if qs.isEmpty { return (.unknown, "B 站画质清单为空") }
+        return (.sdr, "B 站画质清单：最高 \(qs.max().map(name) ?? "未知")")
+    }
+
+    /// 诊断用：当前读到的行 + 缓存结论
+    static func snapshot() -> String {
+        guard let row = latestRow() else { return "没有播放记录（或读不到数据库）" }
+        stateLock.lock()
+        let hit = cache[row.key]
+        stateLock.unlock()
+        let q = Int(Date().timeIntervalSince(row.updatedAt))
+        var s = "《\(row.title)》"
+        if !row.part.isEmpty && row.part != row.title { s += " · \(row.part)" }
+        s += "\n  进度: \(Int(row.posMs / 1000))s / \(Int(row.durMs / 1000))s，\(q) 秒前写入"
+        s += "\n  画质: \(hit.map { "\($0.verdict.label)（\($0.detail)）" } ?? "尚未读取")"
+        return s
+    }
+}
+
 // MARK: - 播放检测
 
 struct MediaSession {
@@ -1972,6 +2441,7 @@ struct MediaSession {
         case player      // 专门用来放片的播放器
         case streaming   // 浏览器 / 音乐类，拿不到画质信息
         case appStreaming // 原生流媒体客户端（腾讯视频）：有 App 内判据
+        case biliStreaming // B 站客户端（BiliSail）：进度表 + 站点画质清单
     }
 
     let appName: String
@@ -2002,6 +2472,7 @@ struct MediaSession {
         case .player: what = "播放器"
         case .streaming: what = "浏览器"
         case .appStreaming: what = "流媒体客户端"
+        case .biliStreaming: what = "B 站客户端"
         }
         return "\(evidence.label) · \(how) · \(what)"
     }
@@ -2072,6 +2543,12 @@ enum PlaybackWatcher {
         "com.tencent.tenvideo"      // 腾讯视频
     ]
 
+    /// B 站第三方客户端：同属原生播放，但判据完全不同 —— 它把播放进度写在
+    /// 自己的 sqlite 里，画质要去问 B 站接口（见 BiliSailProbe）。
+    static let biliStreamingApps: [String] = [
+        "dev.bilisail.bilisail"     // BiliSail
+    ]
+
     /// 上一轮被排除的下载器名称，只给 `why` / `sessions` 显示用
     private(set) static var ignoredApps: [String] = []
     private static let ignoredLock = NSLock()
@@ -2097,6 +2574,9 @@ enum PlaybackWatcher {
                 if includeStreaming && streamingApps.contains(id) { return (app, .streaming) }
                 // 腾讯视频这类原生流媒体：自己的播放内核会写 HDR 判定日志，
                 // 走单独一档，别让它落进下面的「任意第三方 App」里被判成播放器。
+                if biliStreamingApps.contains(id) {
+                    return includeStreaming ? (app, .biliStreaming) : nil
+                }
                 if nativeStreamingApps.contains(id) {
                     return includeStreaming ? (app, .appStreaming) : nil
                 }
@@ -2185,6 +2665,24 @@ enum PlaybackWatcher {
                 tvResult = nil
             }
 
+            // BiliSail：三条常规路它都不通（没句柄、不是网页、不注册「正在播放」），
+            // 判据全在它自己的播放进度表里 —— 位置在走 = 在播，行还在刷新但位置
+            // 不动 = 暂停，行不再刷新 = 这一场结束了。这里的结论**直接覆盖**上面
+            // 按断言算出来的结果：它播放时靠 wakelock 持有断言，暂停未必撤，
+            // 拿断言当在播的话暂停就分不出来了。
+            var biliState: BiliSailProbe.State?
+            if item.kind == .biliStreaming {
+                biliState = BiliSailProbe.poll(pid: pid)
+                playing = biliState?.playing ?? false
+                if Log.enabled {
+                    var what = "不在播（进度表已停）"
+                    if let b = biliState {
+                        what = (b.playing ? "播放中" : "暂停") + " · " + b.verdict.label + " · " + b.detail
+                    }
+                    Log.write("  BiliSail: " + what)
+                }
+            }
+
             // 活跃度：2 = 在播，1 = 只是前台开着，0 = 后台且没在播（多半是暂停）
             let activity = (playing ? 2 : 0) + (isFront ? 1 : 0)
 
@@ -2246,6 +2744,20 @@ enum PlaybackWatcher {
             var heldPaused = false
 
             if !playing {
+                // BiliSail 暂停：进度表还在刷新、位置不动 —— 片子还挂在那儿。
+                // 它没有句柄也没有「正在播放」注册，这一条就是唯一的在场证明。
+                if item.kind == .biliStreaming {
+                    guard keepPaused, let b = biliState else { continue }
+                    let s = MediaSession(appName: name, path: nil,
+                                         verdict: b.verdict,
+                                         detail: b.detail + " · 已暂停",
+                                         kind: .biliStreaming, evidence: b.evidence,
+                                         activity: 0, paused: true)
+                    result.append(s)
+                    if b.verdict != .unknown { touchJudge(name) }
+                    continue
+                }
+
                 // 腾讯视频暂停：防休眠断言被收回，但片子还挂在那儿。
                 // 它既没有窗口标题可读（没有屏幕录制权限），也没有网页可问，
                 // 所以回日志里再看一眼：只要最后一条内容判定没有落在
@@ -2543,6 +3055,7 @@ enum PlaybackWatcher {
                 switch item.kind {
                 case .streaming: detail = "网页播放中 · 色彩未知"
                 case .appStreaming: detail = "腾讯视频播放中 · 画质未读到"
+                case .biliStreaming: detail = "B 站播放中 · 画质未读到"
                 case .player: detail = "播放中 · 无本地片源"
                 }
                 var evidence = Evidence.none
@@ -2551,6 +3064,12 @@ enum PlaybackWatcher {
                     verdict = web.verdict
                     detail = web.detail
                     evidence = .webProbe
+                }
+                // BiliSail：用进度表那一路查到的画质（站点清单 / 标题线索）
+                if let b = biliState {
+                    verdict = b.verdict
+                    detail = b.detail
+                    evidence = b.evidence
                 }
                 // 腾讯视频：用前面已经读到的那条内容级判定
                 if let tv = tvResult {

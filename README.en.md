@@ -16,11 +16,12 @@ A tiny macOS menu bar utility: **one-click HDR for your external display**. It s
 - When Infuse plays from **this Mac's own SMB share**, it reverse-looks-up the handles held by `smbd`, giving the same precision as a local file
 - For web video (Bilibili / YouTube) it runs a small piece of JS in the browser to read the actual playback quality; the YouTube deadlock where "SDR means no HDR option" is solved too
 - Native streaming clients such as Tencent Video: reads the content-level HDR verdict its own playback core writes (`isHDRVideo=1`)
+- Bilibili's third-party Mac client (BiliSail): reads the playback-progress table in its sandbox to know whether something is playing, and asks Bilibili's `playurl` API for the quality ladder (125 = true-colour HDR, 126 = Dolby Vision)
 - Each toggle costs exactly one blackout, about 0.7 s
 
 ## Download
 
-**[HDRSwitch-1.0.9.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.0.9.dmg)** · 1.2 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.1.0.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.1.0.dmg)** · 1.5 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
 
 Open the dmg and drag `HDRSwitch.app` into Applications. It is signed locally with a self-signed certificate and notarised by nobody, so the first launch gets blocked once: **hold Control, click it, then Open**.
 
@@ -34,7 +35,7 @@ Only the Xcode command line tools are needed:
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app, double-click to run
-./package.sh    # → build/HDRSwitch-1.0.9.dmg, distributable
+./package.sh    # → build/HDRSwitch-1.1.0.dmg, distributable
 ```
 
 The complete end-user guide: **<https://lsjingyun.github.io/HDRSwitch/>** (that is [`docs/index.html`](docs/index.html) — a single file with no external dependencies, also shipped inside the DMG, ⌘P saves it as PDF).
@@ -163,6 +164,24 @@ Tencent Video's HDR standard is HDR Vivid ("臻彩视听"), written `HDRVivid` i
 **This path needs Full Disk Access.** The logs sit inside Tencent Video's own sandbox container (`~/Library/Containers/com.tencent.tenvideo/…`), and any other app must hold that grant to read them — otherwise the system simply returns `permission denied` and HDRSwitch quietly decides "quality unreadable". The menu has an item for it ("腾讯视频识别：点击授权") which opens the settings pane with HDRSwitch highlighted; tick it and restart once. Not having it isn't a failure: the Tencent Video section of `HDRSwitch why` says so explicitly.
 
 `HDRSwitch why` has a Tencent Video section listing what was read and the log path, so there is nothing to guess at.
+
+### Bilibili client (BiliSail)
+
+Bilibili has no official Mac client; the third-party **BiliSail** (Flutter + libmpv) is the common one. It is sandboxed too and exposes no readable media handle, but it keeps a playback-progress table inside its container:
+
+```text
+~/Library/Containers/dev.bilisail.bilisail/Data/Library/Application Support/
+  dev.bilisail.bilisail/bilisail.sqlite
+  └── playback_progress: bvid / cid / title / position_ms / duration_ms / updated_at_ms
+```
+
+**Whether something is playing is decided by the windows, not by that table.** Windowed playback has two windows (player + main), full screen has one but covering the display, and a paused video shrunk to the mini player still has two (`81×96` counts). Crucially, **closing the player does not destroy its windows** — BiliSail leaves a handful of offscreen shells (four `2560×30` title bars plus a `64×64` stub), so the count stays ≥2 and "closed" looks exactly like "paused". That was the "closing the video never falls back" bug. Only windows **actually on screen** are counted (layer 0, ≥40×40): a `1120×828` list window (≈25% of the display) means closed, an `81×96` mini player (0.2%) means paused — the 5% line separates them cleanly.
+
+The table itself cannot tell pause from close — it writes every 5 s while playing but **almost never while paused** (measured: one heartbeat in 20 s), so it is only a fallback when no window information is available.
+
+**Whether the source is HDR comes from Bilibili's API.** The local database has no quality field, so `bvid`/`cid` go to `playurl` (`qn=126&fnval=4048&fourk=1`, needs a `Referer`) and the tool looks for **125 (true-colour HDR)** or **126 (Dolby Vision)** in `accept_quality`. Until the reply arrives it falls back to hints in the title, then updates; results are cached per `bvid/cid` for 6 hours.
+
+The table lives in a sandbox as well, so it needs the same Full Disk Access as Tencent Video — granting one covers both. The `BiliSail（B 站客户端）` section of `HDRSwitch why` reports either "unreadable · missing Full Disk Access" or the live verdict.
 
 ### Browsers / web video
 
@@ -294,20 +313,22 @@ Caveat: private interfaces may be renamed or re-signatured in a major OS release
 
 ## Icon
 
-The icon is drawn in code, there is no image asset: `Tools/makeicon.swift` renders on a 2048 canvas with CoreGraphics and downsamples to 1024. Change colours or proportions by editing the numbers in the script and regenerating.
+The current icon is a **warm glowing toggle on a dark plate**, produced from a 1168×1198 screenshot with `Tools/makeicon-toggle.swift`:
 
 ```bash
-swift Tools/makeicon.swift build/icon/AppIcon-1024.png
+swift Tools/makeicon-toggle.swift source.jpg build/icon/AppIcon-1024.png
 ```
 
-**Design**: a sphere cut at 45° on a dark plate — the lower left sinks into shadow, the upper right is hit by hard light, a highlight line sits on the boundary, a halo surrounds it. HDR is precisely "deep black and blinding highlight in the same frame", and one sphere says it; no letters, no text, still readable at 32 px.
+The script does three things: crop the rounded rectangle to a centred square using the bounding box of the dark body, let it **fill** the 1024 canvas, then apply a superellipse mask (exponent 5) to cut away the white corners and drop shadow. All sizes are produced with `sips` and packed into an icns with `iconutil`.
 
-**Two pitfalls**:
+**Two pitfalls:**
 
-- ⚠️ **It must be full-bleed.** The macOS 26/27 icon spec is a shape filling the whole canvas, with the system applying the rounded mask. The first version kept a 100 px transparent margin per the old spec, and the system treated the transparent area as empty and put a white glass plate behind it — the icon became "a dark blob inside a white frame". Full-bleed fixed it.
-- The outer halo needs **additive blending** (`plusLighter`), not ordinary alpha — plain alpha stains the dark plate an ugly brown; additive is "light added on top of dark", and dark stays dark. The spill is also clipped to the lit side only; on the dark side it smears into grey fog.
+- ⚠️ **It must be full-bleed.** The macOS 26/27 icon spec is a shape filling the whole canvas, with the system applying the rounded mask. Keep a 100 px transparent margin the old way and the system treats that area as empty and puts a white glass plate behind it — "a dark blob inside a white frame", most obvious on a dark Dock. Easy to check: render it with `NSWorkspace.icon(forFile:)` and the canvas edge should be the dark body itself, not a light plate.
+- ⚠️ **Trim 3 px off the edge.** The anti-aliased rim of a screenshot is blended with white; leave it and you get a light outline on dark backgrounds. Inset the mask 3 px and feather 1.5 px — that's enough.
 
-The bundling flow is in `build.sh` (`Resources/AppIcon.icns` → `Contents/Resources/`), with `CFBundleIconFile` in Info.plist pointing at `AppIcon`. All sizes are produced from 1024 with `sips` and packed into an icns with `iconutil`.
+The earlier icon is still in the repo: a sphere cut at 45° on a dark plate ("deep black and blinding highlight in the same frame"). It is pure code, `Tools/makeicon.swift`, rendered on a 2048 canvas and downsampled to 1024, so you can switch back any time. **Its halo needs additive blending** (`plusLighter`), not ordinary alpha — plain alpha stains the dark plate brown.
+
+The bundling flow is in `build.sh` (`Resources/AppIcon.icns` → `Contents/Resources/`), with `CFBundleIconFile` in Info.plist pointing at `AppIcon`.
 
 ## Packaging a DMG
 

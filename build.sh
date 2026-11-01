@@ -13,7 +13,8 @@ swiftc -swift-version 5 -O \
     -o "$APP/Contents/MacOS/HDRSwitch" \
     Sources/main.swift Sources/Detect.swift Sources/AutoHDR.swift Sources/WebProbe.swift \
     -framework Cocoa -framework Carbon -framework ServiceManagement \
-    -framework AVFoundation -framework CoreMedia -framework IOKit
+    -framework AVFoundation -framework CoreMedia -framework IOKit \
+    -lsqlite3    # 读 BiliSail 的播放进度表（只读）
 
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"

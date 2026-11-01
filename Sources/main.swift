@@ -463,6 +463,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Log.write("权限自检 · 共享识别=\(ok ? "可用" : "不可用") · \(title)", force: true)
         }
 
+        // BiliSail 的播放进度表在它自己的沙盒容器里，读它要「完全磁盘访问权限」
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 3) {
+            Log.write("权限自检 · BiliSail 进度表=\(BiliSailProbe.canRead() ? "可读" : "读不到（缺完全磁盘访问权限）")",
+                      force: true)
+        }
+
         // 网页画质探测要往浏览器发 Apple 事件。必须由 App 自己发（不能靠命令行试），
         // 因为系统是按「谁发起的」来判授权的。
         if WebProbe.enabled {
@@ -1110,6 +1116,24 @@ func runCLI(_ command: String) -> Never {
             print("  当前内容: 读不到（没在播 / 已停止播放 / 日志不可读）")
         }
         print("  判定来源: 播放内核日志 \(TencentVideoProbe.logDir)")
+        print("")
+
+        print("=== BiliSail（B 站客户端）===")
+        if !BiliSailProbe.canRead() {
+            print("  读不到 · 缺少「完全磁盘访问权限」")
+            print("            系统设置 → 隐私与安全性 → 完全磁盘访问权限 → 勾选 HDRSwitch")
+        } else {
+            print("  " + BiliSailProbe.snapshot().replacingOccurrences(of: "\n", with: "\n  "))
+            let pid = NSRunningApplication
+                .runningApplications(withBundleIdentifier: BiliSailProbe.bundleID)
+                .first?.processIdentifier ?? 0
+            if pid > 0, let s = BiliSailProbe.poll(pid: pid) {
+                print("  现场: \(s.playing ? "在播" : "暂停") · 判定 \(s.verdict.label) · \(s.detail)")
+            } else {
+                print("  现场: 没在播（进度表已停 / 播放窗口已关）")
+            }
+        }
+        print("  判定来源: 播放进度表 \(BiliSailProbe.dbPath)")
         print("")
 
         print("=== 自动模式 ===")
