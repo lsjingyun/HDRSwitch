@@ -21,7 +21,7 @@ macOS 菜单栏小工具：**一键开关外接显示器的 HDR**。播 HDR 片�
 
 ## 下载
 
-**[HDRSwitch-1.1.0.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.1.0.dmg)** · 1.5 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.1.1.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.1.1.dmg)** · 1.5 MB · 通用二进制（Apple Silicon + Intel） · [更新记录](https://github.com/lsjingyun/HDRSwitch/releases)
 
 打开 dmg，把 `HDRSwitch.app` 拖进「应用程序」。本地自签名、没有 Apple 公证，第一次打开会被拦一次：**按住 Control 点它 → 打开**。
 
@@ -35,7 +35,7 @@ macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连�
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app，双击即用
-./package.sh    # → build/HDRSwitch-1.1.0.dmg，可分发
+./package.sh    # → build/HDRSwitch-1.1.1.dmg，可分发
 ```
 
 面向使用者的完整说明：**<https://lsjingyun.github.io/HDRSwitch/>**（即 [`docs/index.html`](docs/index.html)，单文件、无外部依赖，DMG 里也带一份，⌘P 可存 PDF）。
@@ -46,7 +46,7 @@ macOS 13 及以上。实测环境为 macOS 26/27 + M4 Pro + LG 5K（HDMI 直连�
 | 操作 | 效果 |
 | --- | --- |
 | 点击菜单栏 `HDR` 图标 | 切换 HDR（图标变亮 + 下方出现横线 = 已开启） |
-| 右键点击图标 | 打开菜单（切换 / 选显示器 / 开机自启 / 诊断 / 退出） |
+| 右键点击图标 | 打开菜单（开关 / 自动切换设置 / 选显示器 / 开机自启 / 诊断 / 退出） |
 | `⌘⌥H` | 全局快捷键，任何界面下都能切换 |
 | 在「应用程序」里再双击一次 App | 弹一条当前状态提示（不再擅自切换，避免误触） |
 
@@ -246,7 +246,7 @@ YouTube 有个先有鸡还是先有蛋的问题：**显示器不是 HDR 时，�
 
 - 播放结束（检测不到会话）
 - **换了片源或换了播放器**（以前这里会一直粘住，导致换集后不再自动切）
-- 菜单 → 自动切换选项 → **恢复自动接管**
+- 自动切换设置 → **恢复自动接管**
 
 ### 稳定性上做过的处理
 
