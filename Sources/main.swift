@@ -337,12 +337,19 @@ final class HUD {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        // 材质跟菜单对齐：用系统的 HUD 材质，而不是自绘一层半透明黑。
+        // 自绘的那层会和窗口背后的系统模糊叠成「双层模糊」，圆角、描边、明度
+        // 又和菜单对不上 —— 同一套交互里出现两种质感，看起来就是脏。
+        let box = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        box.material = .hudWindow
+        box.blendingMode = .behindWindow
+        box.state = .active
+        box.appearance = NSAppearance(named: .darkAqua)   // HUD 材质恒为深色，保证白字对比度
         box.wantsLayer = true
-        box.layer?.backgroundColor = NSColor(calibratedWhite: 0.09, alpha: 0.9).cgColor
-        box.layer?.cornerRadius = 16
+        box.layer?.cornerRadius = 14                      // 与菜单的圆角同一档
+        box.layer?.masksToBounds = true
         box.layer?.borderWidth = 0.5
-        box.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.12).cgColor
+        box.layer?.borderColor = NSColor(white: 1, alpha: 0.10).cgColor
 
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 13.5, weight: .medium)
@@ -563,22 +570,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = nil
     }
 
+    // MARK: 菜单
+
+    // 视觉规范（这一节就是菜单的「设计系统」，改样式只改这里）
+    //
+    //   层级  最多三层：主菜单 → 自动切换设置 → 识别与权限 / 播放结束后切回 SDR。
+    //         分组靠「节标题」和不带缩进的整行分隔线表达，**不用前置空格**缩进 ——
+    //         空格会随字号、语言、系统版本错位，而且菜单里根本量不准。
+    //   状态  勾选态一律走 NSMenuItem.state（系统画 ✓）；缺权限用 ⚠︎ 前缀。
+    //         标题里不再写「已开启 / 关闭 / 点击授权（长解释）」，解释放 toolTip。
+    //   字阶  正文 13（系统默认）· 信息行 11.5 次要色 · 节标题 10.5 加粗三级色。
+    //   材质  NSMenu 的背景、圆角、阴影、悬停高亮全部由 macOS 绘制（26/27 上是
+    //         Liquid Glass），这里一行都不覆盖：自绘只会叠出第二层模糊。
+
+    /// 信息行：只读状态。小一号 + 次要色，跟正文拉开一档。
+    private func infoRow(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        return item
+    }
+
+    /// 节标题：比正文更小、加粗、更淡。用来分段，比连排分隔线安静得多。
+    private func sectionRow(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .kern: 0.3,
+        ])
+        return item
+    }
+
+    /// 开关行：状态只由勾选表达
+    private func toggleRow(_ title: String, on: Bool, action: Selector,
+                           tip: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = on ? .on : .off
+        item.toolTip = tip
+        return item
+    }
+
+    /// 普通动作行
+    private func actionRow(_ title: String, action: Selector, tip: String? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.toolTip = tip
+        return item
+    }
+
+    /// 权限行：就绪 → 灰色 ✓，不可点；缺权限 → ⚠︎ + 可点。
+    /// 全菜单同一套符号，用户看一眼就知道哪几项还没给。
+    private func permissionRow(_ title: String, ready: Bool, verb: String,
+                               action: Selector, tip: String) -> NSMenuItem {
+        let item = NSMenuItem(title: ready ? title : "⚠︎ \(title)（\(verb)）",
+                              action: ready ? nil : action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = !ready
+        item.state = ready ? .on : .off
+        item.toolTip = tip
+        return item
+    }
+
     func buildMenu() -> NSMenu {
         let d = activeDisplay
         let isOn = HDR.isOn(d)
+        let auto = AutoHDR.shared
+
         let menu = NSMenu()
+        // 可用状态一律显式设置：默认的 autoenables 会按「有没有 action」自行启用，
+        // 灰色信息行会在某些时机突然变成可点的
+        menu.autoenablesItems = false
 
-        let header = NSMenuItem(title: "\(Displays.name(d)) · \(isOn ? "HDR 已开启" : "HDR 已关闭")",
-                                action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-
-        let sub = NSMenuItem(title: "  当前 \(Displays.subtitle(d))", action: nil, keyEquivalent: "")
-        sub.isEnabled = false
-        menu.addItem(sub)
+        // ── 一、我在控制哪块屏、现在什么状态（只读，两行）
+        let nameRow = NSMenuItem(title: Displays.name(d), action: nil, keyEquivalent: "")
+        nameRow.isEnabled = false
+        nameRow.attributedTitle = NSAttributedString(string: Displays.name(d), attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        menu.addItem(nameRow)
+        menu.addItem(infoRow("\(Displays.subtitle(d)) · HDR \(isOn ? "已开启" : "已关闭")"))
 
         menu.addItem(.separator())
 
+        // ── 二、主操作只有一条
         let toggle = NSMenuItem(title: isOn ? "关闭 HDR" : "开启 HDR",
                                 action: #selector(menuToggle), keyEquivalent: "h")
         toggle.keyEquivalentModifierMask = [.control, .option]
@@ -587,141 +668,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // MARK: 自动切换
+        // ── 三、自动切换：开关 + 一行状态 + 进设置
+        menu.addItem(toggleRow("播放 HDR 内容时自动开启", on: auto.enabled,
+                               action: #selector(menuToggleAuto)))
+        // summary() 自带「自动切换：」前缀，进了这个分组就不必再重复
+        let full = auto.summary()
+        let prefix = "自动切换："
+        menu.addItem(infoRow(full.hasPrefix(prefix) ? String(full.dropFirst(prefix.count)) : full))
 
-        let auto = AutoHDR.shared
-        let autoItem = NSMenuItem(title: "播放 HDR 内容时自动开启", action: #selector(menuToggleAuto), keyEquivalent: "")
-        autoItem.target = self
-        autoItem.state = auto.enabled ? .on : .off
-        menu.addItem(autoItem)
-
-        let autoStatus = NSMenuItem(title: "  " + auto.summary(), action: nil, keyEquivalent: "")
-        autoStatus.isEnabled = false
-        menu.addItem(autoStatus)
-
-        let autoOptions = NSMenu()
-        let unknownItem = NSMenuItem(title: "播放器识别不到片源时也开 HDR", action: #selector(menuToggleUnknown), keyEquivalent: "")
-        unknownItem.target = self
-        unknownItem.state = auto.unknownAsHDR ? .on : .off
-        autoOptions.addItem(unknownItem)
-
-        let keepItem = NSMenuItem(title: "识别不到片源时保持已有 HDR（不自动关）", action: #selector(menuToggleKeepUnknown), keyEquivalent: "")
-        keepItem.target = self
-        keepItem.state = auto.keepUnknownPlayer ? .on : .off
-        autoOptions.addItem(keepItem)
-
-        let pausedItem = NSMenuItem(title: "暂停播放时保持 HDR（不退回 SDR）", action: #selector(menuToggleKeepPaused), keyEquivalent: "")
-        pausedItem.target = self
-        pausedItem.state = auto.keepPaused ? .on : .off
-        autoOptions.addItem(pausedItem)
-
-        // 「暂停」和「关掉片子」在系统信号里长得一样，唯一分得开的是播放界面 ——
-        // 那需要屏幕录制权限。给了就能做到「关掉片子立刻回落」。
-        let winOK = WindowProbe.titlesAvailable
-        let winItem = NSMenuItem(
-            title: winOK ? "暂停 / 停播识别：精确（读得到播放界面）"
-                         : "暂停 / 停播识别：点击授权（分清「暂停」和「关掉片子」）",
-            action: winOK ? nil : #selector(menuGrantScreenRecording),
-            keyEquivalent: "")
-        winItem.target = self
-        winItem.isEnabled = !winOK
-        autoOptions.addItem(winItem)
-
-        let smbAccess = SMBService.hasAccess()
-        let smbItem = NSMenuItem(
-            title: smbAccess ? "共享片源识别：已就绪" : "共享片源识别：点击安装（读共享里的片源）",
-            action: smbAccess ? nil : #selector(menuOpenFullDiskAccess),
-            keyEquivalent: "")
-        smbItem.target = self
-        smbItem.isEnabled = !smbAccess
-        autoOptions.addItem(smbItem)
-
-        // 腾讯视频把画质判定写在自己的沙盒容器里，读它需要「完全磁盘访问权限」。
-        // 没授权时菜单栏必须说清楚 —— 否则用户看到的就是「播了 HDR 片却毫无反应」，
-        // 而命令行（继承终端权限）又是正常的，根本没线索。
-        if NSWorkspace.shared.runningApplications.contains(where: {
-            $0.bundleIdentifier == TencentVideoProbe.bundleID
-        }) || FileManager.default.fileExists(atPath: "/Applications/QQLive.app") {
-            let tvOK = TencentVideoProbe.canRead()
-            let tvItem = NSMenuItem(
-                title: tvOK ? "腾讯视频识别：已就绪"
-                            : "腾讯视频识别：点击授权（读播放内核画质日志）",
-                action: tvOK ? nil : #selector(menuOpenFullDiskAccess),
-                keyEquivalent: "")
-            tvItem.target = self
-            tvItem.isEnabled = !tvOK
-            autoOptions.addItem(tvItem)
-        }
-
-        // 读外置盘 / 网络卷上的片源会触发系统授权框，而授权跟着签名走 ——
-        // 每次重新编译都要再点一遍。默认不读，靠文件名判定；需要精确时再打开。
-        let extItem = NSMenuItem(
-            title: MediaProbe.readExternal
-                ? "读取外置卷片源信息：已开启（会请求磁盘授权）"
-                : "读取外置卷片源信息：关闭（不弹磁盘授权，只按文件名判）",
-            action: #selector(menuToggleReadExternal), keyEquivalent: "")
-        extItem.target = self
-        extItem.state = MediaProbe.readExternal ? .on : .off
-        autoOptions.addItem(extItem)
-
-        let streamItem = NSMenuItem(title: "网页视频一律按 HDR 切（读不到画质）", action: #selector(menuToggleStreaming), keyEquivalent: "")
-        streamItem.target = self
-        streamItem.state = auto.streamingAsHDR ? .on : .off
-        autoOptions.addItem(streamItem)
-
-        let probeItem = NSMenuItem(title: "网页视频按实测画质切换（B 站 HDR / 杜比）",
-                                   action: #selector(menuToggleWebProbe), keyEquivalent: "")
-        probeItem.target = self
-        probeItem.state = WebProbe.enabled ? .on : .off
-        autoOptions.addItem(probeItem)
-
-        let unlockItem = NSMenuItem(title: "YouTube 藏起 HDR 选项时先切 HDR 解锁",
-                                    action: #selector(menuToggleUnlockHDR), keyEquivalent: "")
-        unlockItem.target = self
-        unlockItem.state = WebProbe.unlockHiddenHDR ? .on : .off
-        autoOptions.addItem(unlockItem)
-
-        let forceItem = NSMenuItem(title: "解锁后直接选 4K HDR 画质（有 4K HDR 就不停在 1080p）",
-                                   action: #selector(menuToggleForceTopHDR), keyEquivalent: "")
-        forceItem.target = self
-        forceItem.state = WebProbe.forceTopHDR ? .on : .off
-        autoOptions.addItem(forceItem)
-
-        let probeState = NSMenuItem(title: "    " + WebProbe.statusText(), action: nil, keyEquivalent: "")
-        probeState.isEnabled = false
-        autoOptions.addItem(probeState)
-
-        autoOptions.addItem(.separator())
-        let graceTitle = NSMenuItem(title: "播放结束后切回 SDR", action: nil, keyEquivalent: "")
-        graceTitle.isEnabled = false
-        autoOptions.addItem(graceTitle)
-        for (label, seconds) in [("立即", 3.0), ("10 秒后", 10.0), ("30 秒后", 30.0), ("1 分钟后", 60.0), ("5 分钟后", 300.0)] {
-            let item = NSMenuItem(title: "    " + label, action: #selector(menuPickGrace(_:)), keyEquivalent: "")
-            item.representedObject = NSNumber(value: seconds)
-            item.state = abs(auto.grace - seconds) < 0.5 ? .on : .off
-            item.target = self
-            autoOptions.addItem(item)
-        }
-        if auto.isHolding {
-            let release = NSMenuItem(title: "恢复自动接管（当前为手动）", action: #selector(menuReleaseHold), keyEquivalent: "")
-            release.target = self
-            autoOptions.insertItem(release, at: 0)
-            autoOptions.insertItem(.separator(), at: 1)
-        }
-
-        let optionsItem = NSMenuItem(title: "自动切换选项", action: nil, keyEquivalent: "")
-        optionsItem.submenu = autoOptions
+        let optionsItem = NSMenuItem(title: "自动切换设置", action: nil, keyEquivalent: "")
+        optionsItem.submenu = buildAutoMenu()
         menu.addItem(optionsItem)
 
+        // ── 多屏时才有：选控制哪一块
         let ids = Displays.online()
         if ids.count > 1 {
             let displayMenu = NSMenu()
+            displayMenu.autoenablesItems = false
             for id in ids {
-                let item = NSMenuItem(title: "\(Displays.name(id))  (\(Displays.subtitle(id)))",
+                let item = NSMenuItem(title: Displays.name(id),
                                       action: #selector(menuPickDisplay(_:)), keyEquivalent: "")
                 item.representedObject = NSNumber(value: id)
                 item.state = (id == d) ? .on : .off
                 item.target = self
+                item.toolTip = Displays.subtitle(id)
                 displayMenu.addItem(item)
             }
             let displayItem = NSMenuItem(title: "显示器", action: nil, keyEquivalent: "")
@@ -731,14 +701,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let login = NSMenuItem(title: "开机自动启动", action: #selector(menuToggleLogin), keyEquivalent: "")
-        login.target = self
-        login.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
-        menu.addItem(login)
-
-        let diag = NSMenuItem(title: "复制诊断信息", action: #selector(menuCopyDiagnostics), keyEquivalent: "")
-        diag.target = self
-        menu.addItem(diag)
+        // ── 四、低频设置与退出
+        menu.addItem(toggleRow("开机自动启动",
+                               on: SMAppService.mainApp.status == .enabled,
+                               action: #selector(menuToggleLogin)))
+        menu.addItem(actionRow("复制诊断信息", action: #selector(menuCopyDiagnostics),
+                               tip: "把当前判定、显示器状态和最近几行日志复制到剪贴板"))
 
         menu.addItem(.separator())
 
@@ -747,11 +715,132 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quit)
 
         // 版本号挂在最后：反馈问题时报一句就能对上包
-        let ver = NSMenuItem(title: "  " + AppDelegate.versionText, action: nil, keyEquivalent: "")
-        ver.isEnabled = false
-        menu.addItem(ver)
+        menu.addItem(infoRow(AppDelegate.versionText))
 
         return menu
+    }
+
+    /// 「自动切换设置」：四组 16 行，全部两层以内（识别与权限再往下开一层）。
+    /// 之前是 20 行平铺 —— 判定开关、权限状态、回落时长混在一起，谁也不挨着谁。
+    private func buildAutoMenu() -> NSMenu {
+        let auto = AutoHDR.shared
+        let m = NSMenu()
+        m.autoenablesItems = false
+
+        // 手动接管中：这条放最上面 —— 此刻用户最需要的是「怎么交回去」
+        if auto.isHolding {
+            m.addItem(actionRow("恢复自动接管", action: #selector(menuReleaseHold),
+                                tip: "当前是手动模式，自动判定暂停中"))
+            m.addItem(.separator())
+        }
+
+        m.addItem(sectionRow("判定"))
+        m.addItem(toggleRow("播放器识别不到片源时也开 HDR", on: auto.unknownAsHDR,
+                            action: #selector(menuToggleUnknown)))
+        m.addItem(toggleRow("识别不到片源时保持已有 HDR", on: auto.keepUnknownPlayer,
+                            action: #selector(menuToggleKeepUnknown)))
+        m.addItem(toggleRow("暂停播放时保持 HDR", on: auto.keepPaused,
+                            action: #selector(menuToggleKeepPaused)))
+
+        m.addItem(.separator())
+
+        m.addItem(sectionRow("网页视频"))
+        m.addItem(toggleRow("按实测画质切换", on: WebProbe.enabled,
+                            action: #selector(menuToggleWebProbe),
+                            tip: "让浏览器跑一小段脚本读实际画质：B 站 HDR / 杜比视界"))
+        m.addItem(toggleRow("YouTube 藏起 HDR 时先切 HDR 解锁", on: WebProbe.unlockHiddenHDR,
+                            action: #selector(menuToggleUnlockHDR)))
+        m.addItem(toggleRow("解锁后直接选 4K HDR", on: WebProbe.forceTopHDR,
+                            action: #selector(menuToggleForceTopHDR)))
+        m.addItem(toggleRow("读不到画质时一律按 HDR 切", on: auto.streamingAsHDR,
+                            action: #selector(menuToggleStreaming)))
+        m.addItem(infoRow("探测：" + WebProbe.statusText()))
+
+        m.addItem(.separator())
+
+        m.addItem(sectionRow("回落"))
+        let grace = NSMenuItem(title: "播放结束后切回 SDR", action: nil, keyEquivalent: "")
+        let graceMenu = NSMenu()
+        graceMenu.autoenablesItems = false
+        for (label, seconds) in [("立即", 3.0), ("10 秒后", 10.0), ("30 秒后", 30.0),
+                                 ("1 分钟后", 60.0), ("5 分钟后", 300.0)] {
+            let item = NSMenuItem(title: label, action: #selector(menuPickGrace(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = NSNumber(value: seconds)
+            item.state = abs(auto.grace - seconds) < 0.5 ? .on : .off
+            graceMenu.addItem(item)
+        }
+        grace.submenu = graceMenu
+        m.addItem(grace)
+
+        m.addItem(.separator())
+
+        // 「识别与权限」收进第三层：这里是一次性配置，不该常驻在主列表里。
+        // 标题上带缺项计数，不展开也知道还有几项没给。
+        let missing = permissionRows().filter { !$0.ready }.count
+        let permItem = NSMenuItem(title: missing > 0 ? "识别与权限 · \(missing) 项待授权" : "识别与权限",
+                                  action: nil, keyEquivalent: "")
+        permItem.submenu = buildPermissionMenu()
+        m.addItem(permItem)
+
+        return m
+    }
+
+    private struct PermissionSlot {
+        let ready: Bool
+        let build: () -> NSMenuItem
+    }
+
+    /// 逐条列出权限项。集中在一处，方便数「还差几项」
+    private func permissionRows() -> [PermissionSlot] {
+        var slots: [PermissionSlot] = []
+
+        let smbOK = SMBService.hasAccess()
+        slots.append(PermissionSlot(ready: smbOK) { [unowned self] in
+            self.permissionRow("共享片源识别", ready: smbOK, verb: "点击授权",
+                               action: #selector(self.menuOpenFullDiskAccess),
+                               tip: "Infuse 播本机 SMB 共享时反查 smbd 的句柄。需要完全磁盘访问权限；"
+                                   + "装了共享识别小工具也可以")
+        })
+
+        // 只有装了 / 开着腾讯视频才显示这一条，免得没有这个 App 的人看一条无关的权限
+        if NSWorkspace.shared.runningApplications.contains(where: {
+            $0.bundleIdentifier == TencentVideoProbe.bundleID
+        }) || FileManager.default.fileExists(atPath: "/Applications/QQLive.app") {
+            let tvOK = TencentVideoProbe.canRead()
+            slots.append(PermissionSlot(ready: tvOK) { [unowned self] in
+                self.permissionRow("腾讯视频识别", ready: tvOK, verb: "点击授权",
+                                   action: #selector(self.menuOpenFullDiskAccess),
+                                   tip: "读腾讯视频播放内核写的画质日志（isHDRVideo）。需要完全磁盘访问权限")
+            })
+        }
+
+        let biliOK = BiliSailProbe.canRead()
+        slots.append(PermissionSlot(ready: biliOK) { [unowned self] in
+            self.permissionRow("B 站客户端识别", ready: biliOK, verb: "点击授权",
+                               action: #selector(self.menuOpenFullDiskAccess),
+                               tip: "读 BiliSail 沙盒里的播放进度表。需要完全磁盘访问权限")
+        })
+
+        let winOK = WindowProbe.titlesAvailable
+        slots.append(PermissionSlot(ready: winOK) { [unowned self] in
+            self.permissionRow("暂停 / 停播识别", ready: winOK, verb: "点击授权",
+                               action: #selector(self.menuGrantScreenRecording),
+                               tip: "读播放器窗口标题，分清「暂停」和「关掉片子」。需要屏幕录制权限")
+        })
+
+        return slots
+    }
+
+    private func buildPermissionMenu() -> NSMenu {
+        let m = NSMenu()
+        m.autoenablesItems = false
+        for slot in permissionRows() { m.addItem(slot.build()) }
+        m.addItem(.separator())
+        m.addItem(toggleRow("读取外置卷片源信息", on: MediaProbe.readExternal,
+                            action: #selector(menuToggleReadExternal),
+                            tip: "打开后会请求磁盘授权；关闭时只按文件名判断"))
+        return m
     }
 
     /// 「HDRSwitch 1.0.4（build 5）」
