@@ -2459,10 +2459,14 @@ struct MediaSession {
     /// 上层可以在「暂停 + 未知」时保持现状，而不是掉色。
     var paused: Bool = false
 
-    /// 证据很弱：这一轮只看到「页面里有个 <video> 在动」，画质一个字都没读到
-    /// （`WebProbe` 返回 nil）。带自动播放片头的普通网页就是这种形态 ——
-    /// 片头一动就当成「在看视频」，再按「读不到画质也切 HDR」处理，屏幕会莫名
-    /// 其妙亮起来。所以这类会话只允许**保持**已有的 HDR，不允许主动开。
+    /// 证据很弱：只有「这一段在动」这一个事实，画质一个字都没读到。
+    /// 三种形态都会落到这里：
+    ///   ① 普通网页的自动播放片头（页面里有个 <video> 在动，但读不到画质）；
+    ///   ② 视频刚打开、还在加载（浏览器已持有播放断言，但 readyState=0、
+    ///      分辨率 0x0，probe 什么都读不到）；
+    ///   ③ 暂停页读不到画质。
+    /// 这三类都只允许**保持**已有的 HDR，不允许主动开 —— 否则「打开一个新标签页」
+    /// 这种和 HDR 无关的动作也能把屏幕切成 HDR。
     var weak: Bool = false
 
     var description: String {
@@ -2480,7 +2484,8 @@ struct MediaSession {
         case .appStreaming: what = "流媒体客户端"
         case .biliStreaming: what = "B 站客户端"
         }
-        return "\(evidence.label) · \(how) · \(what)"
+        // 弱证据要在日志里看得见：这类会话只保持、不开，排查时一眼能区分
+        return "\(evidence.label) · \(how) · \(what)" + (weak ? " · 弱证据" : "")
     }
 }
 
@@ -2827,11 +2832,14 @@ enum PlaybackWatcher {
                         if verdict == .unknown && !samePage {
                             continue
                         }
+                        // 暂停页读不到画质（verdict 停在未知）同样是弱证据：
+                        // 可以保持已有的 HDR，但不许把 HDR 打开。
                         let s = MediaSession(appName: name, path: nil,
                                              verdict: verdict,
                                              detail: detail + " · 已暂停",
                                              kind: .streaming, evidence: .webProbe,
-                                             activity: 0, paused: true)
+                                             activity: 0, paused: true,
+                                             weak: verdict == .unknown)
                         result.append(s)
                         // 续一下判定的时间戳：暂停能挂很久（用户就是要挂很久），
                         // 不续的话 10 分钟「探测暂不可用」的沿用期会先到，
@@ -3084,9 +3092,14 @@ enum PlaybackWatcher {
                     detail = tv.detail
                     evidence = .appLog
                 }
+                // 浏览器「在播」但没有拿到任何画质证据（probe 返回空，典型是
+                // 视频还在加载：readyState=0、分辨率 0x0）：这条只能算弱证据，
+                // 不许凭它把屏幕切成 HDR —— 否则在新标签页里点开一个 SDR 视频，
+                // 加载那一两秒就会被切成 HDR，等画质读出来又掉回去。
                 let s = MediaSession(appName: name, path: nil, verdict: verdict,
                                      detail: detail, kind: item.kind,
-                                     evidence: evidence, activity: activity)
+                                     evidence: evidence, activity: activity,
+                                     weak: item.kind == .streaming && evidence == .none)
                 result.append(s)
                 // 这一条没有片源依据，不覆盖之前读到的判定
                 if verdict != .unknown { noteJudge(s) }

@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.1.2 · 2026-11-07 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.1.4 · 2026-11-07 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -189,7 +189,7 @@
   复制诊断信息
 ────────────────────────
 退出 HDRSwitch              ⌘Q
-HDRSwitch 1.1.2（build 25）</code></pre>
+HDRSwitch 1.1.4（build 27）</code></pre>
 
 <p>「自动切换设置」里再分四组：<b>判定</b>（三条开关）、<b>网页视频</b>（四条开关 + 一行探测状态）、<b>回落</b>（切回 SDR 的时机，右滑一层选）、<b>识别与权限</b>（各条识别线是否就绪，标题上会直接写「几项待授权」）。</p>
 
@@ -638,6 +638,13 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 <!-- ══════════════════ 12 ══════════════════ -->
 <h2 id="log"><span class="n">12</span>版本记录</h2>
 
+<h3>1.1.4 · 2026-11-07</h3>
+<ul>
+  <li><b>修掉「在 YouTube 新标签页打开一个 SDR 视频，屏幕被切成 HDR」。</b>真正触发的是<b>视频刚打开、还在加载</b>的那一两秒：浏览器已经持有播放断言，但页面里 <code>readyState=0</code>、分辨率 <code>0x0</code>，探测脚本什么都读不到。这种时候工具退回一条「在播 · 色彩未知」的兜底会话，而这条会话当时没有被标成弱证据，勾着「原生客户端读不到画质时也按 HDR 切」就会把它当成 HDR。</li>
+  <li><b>改法：兜底会话一律算弱证据。</b>浏览器「在播」但探测没有任何结果时，这条记录只允许<b>保持</b>已有的 HDR，不允许主动开——加载完成后读到真实画质（比如 <code>bt709</code> 的 SDR）自然就会维持原状，读到 HDR 才会切。暂停页读不到画质的情况同样处理。</li>
+  <li><b>日志里能直接看出这类会话：</b>判定依据后面会带「· 弱证据」，排查时不必再猜。</li>
+</ul>
+
 <h3>1.1.2 · 2026-11-07</h3>
 <ul>
   <li><b>修掉「打开一个普通网站，屏幕自己切到 HDR」。</b>触发链是：页面里有个自动播放的片头/背景视频 → 探测脚本把它当成「正在播放」（脚本只检查 <code>!paused</code>、<code>readyState≥2</code>、<code>videoWidth&gt;0</code>，不看尺寸、静音与否）→ 画质一个字都读不到，判定为「未知」→ 勾着「读不到画质也按 HDR 切」时，未知被当成 HDR → 切。实测 <code>dlife.cn</code> 每次打开都复现，HDR 亮约 25 秒（片头长度）后自己回落。</li>
@@ -748,7 +755,7 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 </ul>
 
 <p class="foot">
-  HDRSwitch 1.1.2 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
+  HDRSwitch 1.1.4 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
   English: <a href="https://github.com/lsjingyun/HDRSwitch/blob/main/README.en.md">README.en.md</a> · 源码、下载与更新记录：<a href="https://github.com/lsjingyun/HDRSwitch">github.com/lsjingyun/HDRSwitch</a> · MIT 许可
 </p>
 
