@@ -21,7 +21,7 @@ A tiny macOS menu bar utility: **one-click HDR for your external display**. It s
 
 ## Download
 
-**[HDRSwitch-1.1.2.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.1.2.dmg)** · 1.5 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
+**[HDRSwitch-1.1.4.dmg](https://github.com/lsjingyun/HDRSwitch/releases/latest/download/HDRSwitch-1.1.4.dmg)** · 1.5 MB · universal binary (Apple Silicon + Intel) · [Release notes](https://github.com/lsjingyun/HDRSwitch/releases)
 
 Open the dmg and drag `HDRSwitch.app` into Applications. It is signed locally with a self-signed certificate and notarised by nobody, so the first launch gets blocked once: **hold Control, click it, then Open**.
 
@@ -35,7 +35,7 @@ Only the Xcode command line tools are needed:
 
 ```bash
 ./build.sh      # → build/HDRSwitch.app, double-click to run
-./package.sh    # → build/HDRSwitch-1.1.2.dmg, distributable
+./package.sh    # → build/HDRSwitch-1.1.4.dmg, distributable
 ```
 
 The complete end-user guide: **<https://lsjingyun.github.io/HDRSwitch/>** (that is [`docs/index.html`](docs/index.html) — a single file with no external dependencies, also shipped inside the DMG, ⌘P saves it as PDF).
