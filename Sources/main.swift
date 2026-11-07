@@ -741,6 +741,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             action: #selector(menuToggleKeepUnknown)))
         m.addItem(toggleRow("暂停播放时保持 HDR", on: auto.keepPaused,
                             action: #selector(menuToggleKeepPaused)))
+        // 「读不到画质也按 HDR 切」现在只管原生客户端：网页没有画质证据一律不开，
+        // 否则一个自动播放片头的普通网页就能把屏幕切成 HDR。
+        m.addItem(toggleRow("原生客户端读不到画质时也按 HDR 切", on: auto.streamingAsHDR,
+                            action: #selector(menuToggleStreaming),
+                            tip: "腾讯视频 / B 站客户端读不出画质时按 HDR 处理。"
+                               + "网页不受这一项影响：网页必须真的读到 HDR 才会切"))
 
         m.addItem(.separator())
 
@@ -752,8 +758,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             action: #selector(menuToggleUnlockHDR)))
         m.addItem(toggleRow("解锁后直接选 4K HDR", on: WebProbe.forceTopHDR,
                             action: #selector(menuToggleForceTopHDR)))
-        m.addItem(toggleRow("读不到画质时一律按 HDR 切", on: auto.streamingAsHDR,
-                            action: #selector(menuToggleStreaming)))
         m.addItem(infoRow("探测：" + WebProbe.statusText()))
 
         m.addItem(.separator())

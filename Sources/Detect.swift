@@ -2459,6 +2459,12 @@ struct MediaSession {
     /// 上层可以在「暂停 + 未知」时保持现状，而不是掉色。
     var paused: Bool = false
 
+    /// 证据很弱：这一轮只看到「页面里有个 <video> 在动」，画质一个字都没读到
+    /// （`WebProbe` 返回 nil）。带自动播放片头的普通网页就是这种形态 ——
+    /// 片头一动就当成「在看视频」，再按「读不到画质也切 HDR」处理，屏幕会莫名
+    /// 其妙亮起来。所以这类会话只允许**保持**已有的 HDR，不允许主动开。
+    var weak: Bool = false
+
     var description: String {
         let file = path.map { ($0 as NSString).lastPathComponent } ?? "网络/无本地片源"
         return "\(appName) · \(file) · \(verdict.label)"
@@ -2792,7 +2798,8 @@ enum PlaybackWatcher {
                                              verdict: web?.verdict ?? .unknown,
                                              detail: web?.detail ?? "网页播放中 · 画质未读到",
                                              kind: .streaming, evidence: .webProbe,
-                                             activity: 2 + (isFront ? 1 : 0))
+                                             activity: 2 + (isFront ? 1 : 0),
+                                             weak: web == nil)
                         result.append(s)
                         if let v = web?.verdict, v != .unknown { noteJudge(s) }
                         continue

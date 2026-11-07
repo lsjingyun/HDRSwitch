@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.1.1 · 2026-11-06 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.1.2 · 2026-11-07 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -189,7 +189,7 @@
   复制诊断信息
 ────────────────────────
 退出 HDRSwitch              ⌘Q
-HDRSwitch 1.1.1（build 24）</code></pre>
+HDRSwitch 1.1.2（build 25）</code></pre>
 
 <p>「自动切换设置」里再分四组：<b>判定</b>（三条开关）、<b>网页视频</b>（四条开关 + 一行探测状态）、<b>回落</b>（切回 SDR 的时机，右滑一层选）、<b>识别与权限</b>（各条识别线是否就绪，标题上会直接写「几项待授权」）。</p>
 
@@ -249,7 +249,7 @@ HDRSwitch 1.1.1（build 24）</code></pre>
       <td>解锁后再把画质直接拉到 HDR 版本里最高的一档，不用等 YouTube 自己慢慢爬</td>
     </tr>
     <tr>
-      <td class="k">读不到画质时一律按 HDR 切</td>
+      <td class="k">原生客户端读不到画质时也按 HDR 切</td>
       <td><span class="tag off">关</span></td>
       <td>粗暴模式：网页视频无条件切 HDR。SDR 网页也会切，一般别开</td>
     </tr>
@@ -638,6 +638,13 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 <!-- ══════════════════ 12 ══════════════════ -->
 <h2 id="log"><span class="n">12</span>版本记录</h2>
 
+<h3>1.1.2 · 2026-11-07</h3>
+<ul>
+  <li><b>修掉「打开一个普通网站，屏幕自己切到 HDR」。</b>触发链是：页面里有个自动播放的片头/背景视频 → 探测脚本把它当成「正在播放」（脚本只检查 <code>!paused</code>、<code>readyState≥2</code>、<code>videoWidth&gt;0</code>，不看尺寸、静音与否）→ 画质一个字都读不到，判定为「未知」→ 勾着「读不到画质也按 HDR 切」时，未知被当成 HDR → 切。实测 <code>dlife.cn</code> 每次打开都复现，HDR 亮约 25 秒（片头长度）后自己回落。</li>
+  <li><b>改法：没有画质证据就不许开。</b>网页这一路新增「弱证据」标记——只要这一轮<b>只看到 &lt;video&gt; 在动、画质完全没读到</b>，就不主动开 HDR；已经开着的仍按原逻辑保持（不会因为一次抓空就掉色）。真正的 HDR 网页（B 站画质码 125/126、YouTube 的 color 标记）照旧切。</li>
+  <li><b>那个开关改名并挪了位置：</b>「网页视频一律按 HDR 切」→「<b>原生客户端读不到画质时也按 HDR 切</b>」，只对腾讯视频 / B 站客户端生效，放在「判定」组。它不再影响网页。</li>
+</ul>
+
 <h3>1.1.1 · 2026-11-06</h3>
 <ul>
   <li><b>菜单重排，层级不再靠空格。</b>以前「自动切换选项」是 20 行平铺：判定开关、权限状态、回落时长混在一起，缩进靠标题前面加两个或四个空格——字号一变就错位。现在主菜单收成四段（状态 / 主操作 / 自动切换 / 收尾），「自动切换设置」按<b>判定、网页视频、回落</b>分三组，权限类（共享片源、腾讯视频、B 站、暂停停播）收进第三层「<b>识别与权限</b>」，标题上直接写「N 项待授权」。回落时长（立即 / 10 秒 / 30 秒 / 1 分钟 / 5 分钟）变成「播放结束后切回 SDR」右边的一层。</li>
@@ -741,7 +748,7 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 </ul>
 
 <p class="foot">
-  HDRSwitch 1.1.1 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
+  HDRSwitch 1.1.2 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
   English: <a href="https://github.com/lsjingyun/HDRSwitch/blob/main/README.en.md">README.en.md</a> · 源码、下载与更新记录：<a href="https://github.com/lsjingyun/HDRSwitch">github.com/lsjingyun/HDRSwitch</a> · MIT 许可
 </p>
 
