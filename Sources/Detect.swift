@@ -2804,7 +2804,12 @@ enum PlaybackWatcher {
                                              detail: web?.detail ?? "网页播放中 · 画质未读到",
                                              kind: .streaming, evidence: .webProbe,
                                              activity: 2 + (isFront ? 1 : 0),
-                                             weak: web == nil)
+                                             // 判定停在「未知」就是没有证据 —— 哪怕这一轮
+                                             // 带回了一个结果对象（B 站切集时会把上一轮的
+                                             // 「暂停 · 画质未读到」带过来），也不算证据。
+                                             // 只看 web 是否为空，就会漏掉这种「有对象、没内容」
+                                             // 的情况：切到下一个视频时凭空开 HDR。
+                                             weak: (web?.verdict ?? .unknown) == .unknown)
                         result.append(s)
                         if let v = web?.verdict, v != .unknown { noteJudge(s) }
                         continue
@@ -3099,7 +3104,11 @@ enum PlaybackWatcher {
                 let s = MediaSession(appName: name, path: nil, verdict: verdict,
                                      detail: detail, kind: item.kind,
                                      evidence: evidence, activity: activity,
-                                     weak: item.kind == .streaming && evidence == .none)
+                                     // 判据是「最终判定停在未知」，而不是「有没有拿到
+                                     // 结果对象」：B 站切集时探测会把上一轮的
+                                     // 「网页暂停 · 画质未读到」原样带回来，对象是有的、
+                                     // 证据是没有的。这种会话只能保持，不能开 HDR。
+                                     weak: item.kind == .streaming && verdict == .unknown)
                 result.append(s)
                 // 这一条没有片源依据，不覆盖之前读到的判定
                 if verdict != .unknown { noteJudge(s) }

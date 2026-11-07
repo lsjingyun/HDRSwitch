@@ -126,7 +126,7 @@
     一个挂在菜单栏上的 HDR 开关。系统设置里没有这个开关的时候它替你打开；
     播 HDR 片源时它自己打开，播完自己关掉，顺手把刷新率还给你。
   </p>
-  <p class="meta">版本 1.1.4 · 2026-11-07 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
+  <p class="meta">版本 1.1.5 · 2026-11-08 · 需要 macOS 13 及以上；已在 macOS 26/27 + Apple Silicon 实测</p>
 </header>
 
 <nav class="toc">
@@ -189,7 +189,7 @@
   复制诊断信息
 ────────────────────────
 退出 HDRSwitch              ⌘Q
-HDRSwitch 1.1.4（build 27）</code></pre>
+HDRSwitch 1.1.5（build 28）</code></pre>
 
 <p>「自动切换设置」里再分四组：<b>判定</b>（三条开关）、<b>网页视频</b>（四条开关 + 一行探测状态）、<b>回落</b>（切回 SDR 的时机，右滑一层选）、<b>识别与权限</b>（各条识别线是否就绪，标题上会直接写「几项待授权」）。</p>
 
@@ -638,6 +638,13 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 <!-- ══════════════════ 12 ══════════════════ -->
 <h2 id="log"><span class="n">12</span>版本记录</h2>
 
+<h3>1.1.5 · 2026-11-08</h3>
+<ul>
+  <li><b>修掉「B 站切到下一个视频时 HDR 被凭空打开」。</b>切集瞬间播放器会重建，探测这一轮只带回一条「网页暂停 · 画质未读到」，判定停在未知。这条记录<b>有对象、没内容</b>，而当时判断弱证据的条件是「探测有没有返回对象」——于是它被当成强证据，勾着「读不到画质也按 HDR 切」就把屏幕切成了 HDR，两三秒后又掉回 SDR。</li>
+  <li><b>改法：判据换成「最终判定是不是未知」。</b>浏览器这一路只要判定停在未知，不管探测有没有返回对象，都算弱证据——只能保持已有的 HDR，不能主动开。真正读到画质时才按画质决定。</li>
+  <li><b>验证方式：</b>在同一个 B 站视频上连续点推荐位切换，修复前日志是 <code>未知 · 播放中 · 浏览器  goal=on</code> 并紧跟一次 <code>actuate on=true</code>；修复后同一动作变成 <code>未知 · 播放中 · 浏览器 · 弱证据  goal=off</code>，全程没有切换。</li>
+</ul>
+
 <h3>1.1.4 · 2026-11-07</h3>
 <ul>
   <li><b>修掉「在 YouTube 新标签页打开一个 SDR 视频，屏幕被切成 HDR」。</b>真正触发的是<b>视频刚打开、还在加载</b>的那一两秒：浏览器已经持有播放断言，但页面里 <code>readyState=0</code>、分辨率 <code>0x0</code>，探测脚本什么都读不到。这种时候工具退回一条「在播 · 色彩未知」的兜底会话，而这条会话当时没有被标成弱证据，勾着「原生客户端读不到画质时也按 HDR 切」就会把它当成 HDR。</li>
@@ -755,7 +762,7 @@ sudo rm -f /usr/local/libexec/hdrswitch-smbdump /etc/sudoers.d/hdrswitch</code><
 </ul>
 
 <p class="foot">
-  HDRSwitch 1.1.4 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
+  HDRSwitch 1.1.5 · 本文档随 DMG 一起分发。想打印或存成 PDF：<kbd>⌘</kbd><kbd>P</kbd> → 存储为 PDF。<br>
   English: <a href="https://github.com/lsjingyun/HDRSwitch/blob/main/README.en.md">README.en.md</a> · 源码、下载与更新记录：<a href="https://github.com/lsjingyun/HDRSwitch">github.com/lsjingyun/HDRSwitch</a> · MIT 许可
 </p>
 
